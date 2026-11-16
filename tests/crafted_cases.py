@@ -635,6 +635,43 @@ def _():
     return StreamBuilder(16).compressed(cmds, last=True, force_complex=("cmd", "dist")).finish()
 
 
+@case("dict_zero_length_word_ends_metablock", needs_dictionary=True)
+def _():
+    # The last command's copy is a zero-length dictionary word: MLEN is
+    # reached after its literals, so a decoder must not read its distance
+    # (the builder emits it as insert-only), and the next metablock follows.
+    b = StreamBuilder(11)
+    b.uncompressed(b"x" * 1300)
+    b.compressed([Cmd(b"ab", copy=3, dist=2), Cmd(b"cd", copy=5, dict_ref=(435, 59))])
+    b.uncompressed(b"tail")
+    return b.finish()
+
+
+@case("dict_zero_length_word_mid_metablock", needs_dictionary=True)
+def _():
+    b = StreamBuilder(11)
+    b.uncompressed(b"y" * 1300)
+    b.compressed([Cmd(b"ab", copy=5, dict_ref=(435, 59)), Cmd(b"cd", copy=4, dict_ref=(7, 64)),
+                  Cmd(b"", copy=3, dist=2)], last=True)
+    return b.finish()
+
+
+@case("distance_read_after_mlen_reached_invalid", needs_dictionary=True)
+def _():
+    # Stream whose last command carries distance bits although MLEN is already
+    # reached after its literals: the decoder stops early and the leftover
+    # bits break the following metablock / padding -> must be rejected.
+    w = BitWriter()
+    _raw_header(w, mlen=2)
+    w.write(1, 2), w.write(1, 2), w.write(97, 8), w.write(98, 8)  # literals a,b (1 bit each)
+    w.write(1, 2), w.write(0, 2), w.write(128 + (2 << 3) + 3, 10)  # cmd: insert 2, copy 5, explicit dist
+    w.write(1, 2), w.write(0, 2), w.write(20, 6)                 # dist symbol 20 (3 extra bits)
+    w.write(0, 1), w.write(1, 1)                                  # the literals 'a' 'b'
+    w.write(0b111, 3)                                             # distance extra bits
+    w.write(0b1111, 4)
+    return w.getvalue(), None
+
+
 @case("dict_transform_index_121_invalid", needs_dictionary=True)
 def _():
     b = StreamBuilder(16)

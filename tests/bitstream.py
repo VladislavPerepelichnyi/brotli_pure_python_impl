@@ -651,6 +651,7 @@ class StreamBuilder:
                     blocks, context_modes, lit_cmap, dist_cmap, cmap_rle, cmap_imtf, rng):
         start = len(self.model.out)
         enc = []
+        produced = []
         for i, c in enumerate(cmds):
             ic, iextra, ibits = insert_code(len(c.insert))
             lit_pos = len(self.model.out)
@@ -660,6 +661,7 @@ class StreamBuilder:
                     raise ValueError("insert-only command must be last")
                 sym = command_symbol(ic, 0, ic < 8)
                 enc.append((sym, (iextra, ibits), (0, 0), c.insert, None, lit_pos, 0))
+                produced.append(0)
                 continue
             cc, cextra, cbits = copy_code(c.copy)
             if c.implicit:
@@ -690,6 +692,26 @@ class StreamBuilder:
             else:
                 self.model.out += bytes(c.copy)
             enc.append((sym, (iextra, ibits), (cextra, cbits), c.insert, dsym, lit_pos, c.copy))
+            produced.append(len(self.model.out) - lit_pos - len(c.insert))
+        # A decoder ends the metablock as soon as MLEN bytes exist, so it never
+        # reads the copy/distance of a command whose copy adds nothing at the
+        # end (zero-length dictionary transforms).  Mirror that: trailing
+        # zero-output commands are dropped, and a trailing command whose copy
+        # is empty becomes insert-only.
+        while enc and self.invalid is None:
+            k = len(enc) - 1
+            sym, ins, cpy, lits, dsym, lit_pos, copy_len = enc[k]
+            if copy_len and produced[k] == 0:
+                if lits:
+                    ic = insert_code(len(lits))[0]
+                    enc[k] = (command_symbol(ic, 0, ic < 8), ins, (0, 0), lits, None, lit_pos, 0)
+                    break
+                enc.pop()
+                produced.pop()
+                continue
+            break
+        if not enc:
+            raise ValueError("metablock produces no output")
         mlen = len(self.model.out) - start
         mlen += mlen_delta
         if mlen_delta:

@@ -7,10 +7,9 @@ Public API (mirrors the C-backed ``brotli`` PyPI module):
 """
 
 from .common.constants import MODE_GENERIC, MODE_TEXT, MODE_FONT
+from .common.errors import BrotliError
 
-
-class error(Exception):
-    """Raised on invalid compressed data or invalid parameters."""
+error = BrotliError
 
 
 def decompress(data):

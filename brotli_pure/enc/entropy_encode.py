@@ -39,6 +39,39 @@ def brotli_set_depth(p0, pool_left, pool_right, depth, max_depth):
         stack[level] = -1
 
 
+def sort_huffman_tree_items(items, n, comparator):
+    """SortHuffmanTreeItems: input size optimized Shell sort, ported
+    literally because callers with a non-strict comparator (e.g.
+    BrotliBuildAndStoreHuffmanTreeFast) depend on the exact order of equal
+    elements.  ``items`` is a list, ``comparator(a, b)`` returns a bool."""
+    if n < 13:
+        # Insertion sort.
+        for i in range(1, n):
+            tmp = items[i]
+            k = i
+            j = i - 1
+            while comparator(tmp, items[j]):
+                items[k] = items[j]
+                k = j
+                if j == 0:
+                    break
+                j -= 1
+            items[k] = tmp
+    else:
+        # Shell sort.
+        g = 2 if n < 57 else 0
+        while g < 6:
+            gap = kBrotliShellGaps[g]
+            for i in range(gap, n):
+                j = i
+                tmp = items[i]
+                while j >= gap and comparator(tmp, items[j - gap]):
+                    items[j] = items[j - gap]
+                    j -= gap
+                items[j] = tmp
+            g += 1
+
+
 def _sort_key(item):
     # SortHuffmanTree: least popular first; ties: larger value first.
     return (item[0], -item[1])

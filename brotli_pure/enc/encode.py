@@ -23,6 +23,8 @@ from ..common.errors import BrotliError
 from .backward_references import brotli_create_backward_references
 from .bit_cost import brotli_bits_entropy
 from .brotli_bit_stream import (brotli_store_meta_block,
+                                brotli_store_meta_block_fast,
+                                brotli_store_meta_block_trivial,
                                 brotli_store_uncompressed_meta_block)
 from .command import (init_insert_command, command_restore_distance_code,
                       get_length_code)
@@ -72,7 +74,7 @@ BROTLI_FLINT_DONE = -2
 BROTLI_UINT32_MAX = 0xFFFFFFFF
 
 #: Qualities whose code path is fully ported.
-SUPPORTED_QUALITIES = (5, 6, 10, 11)
+SUPPORTED_QUALITIES = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 
 kMinUTF8Ratio = 0.75
 
@@ -344,13 +346,13 @@ def write_meta_block_internal(data, mask, last_flush_pos, bytes_, is_last,
     last_bytes = w.acc
     last_bytes_bits = w.nbits
     if params.quality <= MAX_QUALITY_FOR_STATIC_ENTROPY_CODES:
-        # BrotliStoreMetaBlockFast
-        raise UnsupportedQualityError(
-            'quality %d is not supported' % params.quality)
+        brotli_store_meta_block_fast(data, wrapped_last_flush_pos, bytes_,
+                                     mask, is_last, params, commands,
+                                     num_commands, w)
     elif params.quality < MIN_QUALITY_FOR_BLOCK_SPLIT:
-        # BrotliStoreMetaBlockTrivial
-        raise UnsupportedQualityError(
-            'quality %d is not supported' % params.quality)
+        brotli_store_meta_block_trivial(data, wrapped_last_flush_pos, bytes_,
+                                        mask, is_last, params, commands,
+                                        num_commands, w)
     else:
         mb = MetaBlockSplit()
         if params.quality < MIN_QUALITY_FOR_HQ_BLOCK_SPLITTING:

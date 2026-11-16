@@ -66,6 +66,10 @@ the oracle (default x86-64 target) does not do that.
   - H10 `FindAllMatches`: the short-distance scan (`best_len <= 2`) finds
     2-byte-prefix candidates with `bytearray.rfind` in the same descending
     order (plain loop when the range wraps the ring buffer).
+  A first version of the copy-code run table ended the last run (code 22)
+  at "infinity" instead of 2117, mis-costing last-distance copies of
+  >= 2118 bytes; it only showed up on bb.binast (400 kB prefix) and is now
+  covered by `test_zopfli_lookup_tables`.
 * Speed (CPython 3.12, one core): roughly 50-120 us per input byte at
   quality 11 (two Zopfli passes + block splitting with 10 iterations); e.g.
   alice29.txt (152 kB) ~10 s, mapsdatazrh (286 kB) ~30 s.  The block

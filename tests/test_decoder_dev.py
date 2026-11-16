@@ -480,6 +480,64 @@ def _dictionary_stream(word_len, refs, wbits=24):
     return w.getvalue(), bytes(expected)
 
 
+def _copy_stream(wbits, prefix, copy_len, distances):
+    """Uncompressed ``prefix`` meta-block, then one compressed meta-block of
+    commands (insert 0, ``copy_len``, explicit distance).  Distances above
+    the current maximum are static dictionary references.  Returns
+    (stream, expected output per our model)."""
+    sym, copy_nbits, copy_extra = _command_symbol(copy_len)
+    expected = bytearray(prefix)
+    body = BitWriter()
+    for distance in distances:
+        max_distance = min(len(expected), (1 << wbits) - 16)
+        dsym, dbits, dextra = _distance_symbol(distance)
+        body.write(copy_nbits, copy_extra)
+        for k in range(5, -1, -1):
+            body.write(1, (dsym >> k) & 1)
+        body.write(dbits, dextra)
+        if distance <= max_distance:
+            for _ in range(copy_len):
+                expected.append(expected[-distance])
+        else:
+            address = distance - max_distance - 1
+            shift = SIZE_BITS_BY_LENGTH[copy_len]
+            word_idx = address & ((1 << shift) - 1)
+            off = OFFSETS_BY_LENGTH[copy_len] + word_idx * copy_len
+            expected += tf.transform_word(DICT[off:off + copy_len],
+                                          address >> shift)
+    w = stream(wbits)
+    if prefix:
+        write_mlen(w, len(prefix), False, uncompressed=True)
+        w.align().write_bytes(prefix)
+    write_mlen(w, len(expected) - len(prefix), True)
+    w.write(3, 0).write(6, 0).write(2, 0).write(2, 0)
+    w.write(2, 1).write(2, 0).write(8, ord("a"))
+    w.write(2, 1).write(2, 0).write(10, sym)
+    w.write(2, 0)
+    static_code = {0: (2, 0), 1: (4, 7)}
+    for idx in (1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15):
+        w.write(*static_code[1 if idx == 6 else 0])
+    w.write(body.nbits, body.acc)
+    return w.align().getvalue(), bytes(expected)
+
+
+@pytest.mark.parametrize("wbits", [10, 11, 12, 16])
+def test_window_edge_distances(wbits):
+    """Back-references right at the window limit (2**wbits - 16) vs. the
+    first dictionary reference just beyond it, after the window wrapped."""
+    rng = random.Random(wbits)
+    prefix = bytes(rng.getrandbits(8) for _ in range(5000))
+    limit = min(len(prefix), (1 << wbits) - 16)
+    distances = [limit, limit - 1, 1, 2, 3, 4, 5, limit + 1, limit,
+                 limit + 2 + (9 << 10), 7, limit + 1 + (3 << 10) + 77]
+    for copy_len in (4, 5, 9):
+        data, expected = _copy_stream(wbits, prefix, copy_len, distances)
+        assert assert_same(data) == expected
+    # One past the maximum, with a copy length that has no dictionary words.
+    data, _ = _copy_stream(wbits, prefix, 3, [limit + 1])
+    assert assert_same(data) is None
+
+
 @pytest.mark.parametrize("word_len", range(4, 25))
 def test_dictionary_all_transforms(word_len):
     """Every transform applied to several dictionary words of each length,
@@ -495,6 +553,13 @@ def test_dictionary_all_transforms(word_len):
     refs = [(wi, t) for wi in candidates for t in range(121)]
     refs.append((candidates[0], 0))  # end with a non-empty word
     data, expected = _dictionary_stream(word_len, refs)
+    assert assert_same(data) == expected
+
+
+def test_zero_length_dictionary_words():
+    """OmitLast9 on a 4-byte word yields an empty word; C accepts it (its
+    `len == 0 && distance <= 120` check cannot trigger here)."""
+    data, expected = _dictionary_stream(4, [(5, 64), (5, 64), (9, 54), (7, 0)])
     assert assert_same(data) == expected
 
 
@@ -606,3 +671,160 @@ def test_differential_fuzz_random_bytes():
     for _ in range(FUZZ_ITERATIONS * 2):
         data = bytes(rng.getrandbits(8) for _ in range(rng.randint(0, 40)))
         assert ours(data) == oracle(data), data.hex()
+
+
+# ---------------------------------------------------------------------------
+# Structure-aware fuzzing: valid headers with random Huffman codes, context
+# maps (RLE / IMTF), block types and distance parameters, followed by random
+# command bits.  Every prefix of the stream is compared with the oracle.
+# ---------------------------------------------------------------------------
+
+def _write_simple_code(w, rng, alphabet_size, symbols=None):
+    """Writes a random simple prefix code; returns {symbol: (nbits, bits)}
+    with ``bits`` in stream (LSB-first) order."""
+    if symbols is None:
+        nsym = rng.randint(1, min(4, alphabet_size))
+        symbols = rng.sample(range(alphabet_size), nsym)
+    nsym = len(symbols)
+    max_bits = (alphabet_size - 1).bit_length()
+    w.write(2, 1).write(2, nsym - 1)
+    for sym in symbols:
+        w.write(max_bits, sym)
+    v = list(symbols)
+    if nsym == 1:
+        return {v[0]: (0, 0)}
+    if nsym == 2:
+        a, b = sorted(v)
+        return {a: (1, 0), b: (1, 1)}
+    if nsym == 3:
+        lo, hi = sorted(v[1:])
+        return {v[0]: (1, 0), lo: (2, 1), hi: (2, 3)}
+    tree_select = rng.randrange(2)
+    w.write(1, tree_select)
+    if tree_select == 0:
+        s = sorted(v)
+        return {s[0]: (2, 0), s[1]: (2, 2), s[2]: (2, 1), s[3]: (2, 3)}
+    lo, hi = sorted(v[2:])
+    return {v[0]: (1, 0), v[1]: (2, 1), lo: (3, 3), hi: (3, 7)}
+
+
+def _write_context_map(w, rng, size, ntrees):
+    """Writes a context map of ``size`` entries referring to ``ntrees``
+    trees, with random RLE parameter and IMTF flag."""
+    if ntrees == 1:
+        w.write(1, 0)  # DecodeVarLenUint8 == 0
+        return
+    n = ntrees - 1
+    nb = n.bit_length() - 1
+    w.write(1, 1).write(3, nb)
+    if nb:
+        w.write(nb, n - (1 << nb))
+    rle = rng.randrange(4)  # max run length prefix (0 = no RLE)
+    if rle:
+        w.write(1, 1).write(4, rle - 1)
+    else:
+        w.write(1, 0)
+    alphabet = ntrees + rle
+    syms = rng.sample(range(alphabet), rng.randint(1, min(4, alphabet)))
+    if rng.random() < 0.9 and not [x for x in syms if x == 0 or x > rle]:
+        syms[0] = 0
+    codes = _write_simple_code(w, rng, alphabet, syms)
+    plain = [x for x in syms if x == 0 or x > rle]
+    i = 0
+    while i < size:
+        sym = rng.choice(syms)
+        if 0 < sym <= rle:
+            reps = rng.randrange(1 << sym)
+            if i + (1 << sym) + reps > size and plain and rng.random() < 0.95:
+                sym = rng.choice(plain)
+        w.write(*codes[sym])
+        if 0 < sym <= rle:
+            w.write(sym, reps)
+            i += (1 << sym) + reps
+        else:
+            i += 1
+    w.write(1, rng.randrange(2))  # IMTF
+
+
+_SHORT_COMMANDS = [i for i, e in enumerate(CMD_LUT) if e[4] <= 2 and e[5] <= 4]
+
+
+def _random_structured_stream(rng):
+    w = BitWriter()
+    wbits = rng.randint(10, 24)
+    write_wbits(w, wbits)
+    # Leading uncompressed / metadata meta-blocks (the uncompressed data
+    # gives back-references something to point to).
+    for k in range(rng.randrange(4)):
+        if k == 0 or rng.random() < 0.5:
+            chunk = bytes(rng.getrandbits(8) for _ in range(rng.randint(1, 300)))
+            write_mlen(w, len(chunk), False, uncompressed=True)
+            w.align().write_bytes(chunk)
+        else:
+            write_metadata(w, bytes(rng.randint(0, 5)))
+    mlen = rng.choice((1, 2, 5, 17, 64, 300, 1000, 3000))
+    write_mlen(w, mlen, True)
+    nbt = []
+    for _ in range(3):
+        n = rng.choice((1, 1, 2, 3, 5))
+        nbt.append(n)
+        if n == 1:
+            w.write(1, 0)
+            continue
+        k = n - 1
+        b = k.bit_length() - 1
+        w.write(1, 1).write(3, b)
+        if b:
+            w.write(b, k - (1 << b))
+        _write_simple_code(w, rng, n + 2)
+        len_codes = _write_simple_code(w, rng, 26)
+        sym = rng.choice(list(len_codes))
+        w.write(*len_codes[sym])
+        nbits = (2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7,
+                 8, 9, 10, 11, 12, 13, 24)[sym]
+        w.write(nbits, rng.getrandbits(nbits))
+    npostfix = rng.randrange(4)
+    ndirect = rng.randrange(16)
+    w.write(2, npostfix).write(4, ndirect)
+    for _ in range(nbt[0]):
+        w.write(2, rng.randrange(4))
+    nlit = rng.choice((1, 1, 2, 3, 4))
+    _write_context_map(w, rng, nbt[0] * 64, nlit)
+    ndist = rng.choice((1, 1, 2, 3))
+    _write_context_map(w, rng, nbt[2] * 4, ndist)
+    dist_alphabet = 16 + (ndirect << npostfix) + (48 << npostfix)
+    for _ in range(nlit):
+        _write_simple_code(w, rng, 256)
+    for _ in range(nbt[1]):
+        # Mostly short insert/copy lengths, so that meta-blocks can complete.
+        if rng.random() < 0.8:
+            syms = rng.sample(_SHORT_COMMANDS, rng.randint(1, 4))
+        else:
+            syms = rng.sample(range(704), rng.randint(1, 4))
+        _write_simple_code(w, rng, 704, syms)
+    for _ in range(ndist):
+        # Mostly "last distance" codes and short direct distances.
+        if rng.random() < 0.7:
+            pool = list(range(16 + (ndirect << npostfix)))
+            syms = rng.sample(pool, rng.randint(1, min(4, len(pool))))
+            _write_simple_code(w, rng, dist_alphabet, syms)
+        else:
+            _write_simple_code(w, rng, dist_alphabet)
+    header_len = (w.nbits + 7) // 8
+    w.write(8 * rng.randint(4, 40), 0)  # reserve, then fill with random bits
+    data = bytearray(w.getvalue())
+    for i in range(header_len, len(data)):
+        data[i] = rng.getrandbits(8) if rng.random() < 0.8 else 0
+    return bytes(data), header_len
+
+
+@pytest.mark.parametrize("seed", range(FUZZ_SEEDS))
+def test_structured_fuzz(seed):
+    rng = random.Random(5000 + seed)
+    successes = 0
+    for _ in range(FUZZ_ITERATIONS // 25):
+        data, header_len = _random_structured_stream(rng)
+        for n in range(max(0, header_len - 2), len(data) + 1):
+            exp = assert_same(data[:n])
+            successes += exp is not None
+    assert successes > 0

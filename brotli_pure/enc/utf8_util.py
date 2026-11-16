@@ -5,6 +5,7 @@ import re
 
 # kMinUTF8Ratio (utf8_util.h)
 kMinUTF8Ratio = 0.75
+K_MIN_UTF8_RATIO = kMinUTF8Ratio
 
 # Runs of bytes 0x01..0x7F: each parses as a 1-byte UTF8 symbol.
 _ASCII_RUN = re.compile(b"[\x01-\x7f]+")

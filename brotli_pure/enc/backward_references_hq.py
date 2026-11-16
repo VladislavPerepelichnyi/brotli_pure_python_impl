@@ -23,7 +23,7 @@ is not context based.
 
 from array import array
 
-from .command import new_command
+from .command import init_command
 from .fast_log import fast_log2
 from .hash_to_binary_tree import MAX_NUM_MATCHES_H10  # noqa: F401 (doc)
 from .literal_cost import brotli_estimate_bit_costs_for_literals
@@ -714,7 +714,7 @@ def brotli_zopfli_create_commands(num_bytes, block_start, nodes, dist_cache,
             dictionary_start = max_backward_limit_
         is_dictionary = distance > dictionary_start + gap
         dist_code = _zopfli_node_distance_code(nodes, nxt)
-        commands.append(new_command(params.dist, insert_length, copy_length,
+        commands.append(init_command(params.dist, insert_length, copy_length,
                                      len_code - copy_length, dist_code))
         if not is_dictionary and dist_code > 0:
             dist_cache[3] = dist_cache[2]
@@ -774,6 +774,8 @@ def brotli_zopfli_compute_shortest_path(num_bytes, position, ringbuffer,
     Computes the shortest path of commands from position to at most
     position + num_bytes.  Returns the number of commands found.
     REQUIRES: nodes != NULL and len(nodes) >= num_bytes + 1"""
+    # C passes &hasher->privat._H10; accept either the Hasher wrapper or H10.
+    hasher = getattr(hasher, "privat", hasher)
     stream_offset = params.stream_offset
     max_backward_limit_ = max_backward_limit(params.lgwin)
     max_zopfli_len_ = max_zopfli_len(params)
@@ -863,6 +865,8 @@ def brotli_create_hq_zopfli_backward_references(num_bytes, position,
     New commands are appended to ``commands`` (whose length on entry is the
     index of the first new command); ``dist_cache`` is updated in place.
     Returns (last_insert_len, num_commands, num_literals)."""
+    # C passes &hasher->privat._H10; accept either the Hasher wrapper or H10.
+    hasher = getattr(hasher, "privat", hasher)
     stream_offset = params.stream_offset
     max_backward_limit_ = max_backward_limit(params.lgwin)
     num_matches = [0] * num_bytes

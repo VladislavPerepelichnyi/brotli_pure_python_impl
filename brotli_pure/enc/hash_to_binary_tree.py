@@ -109,23 +109,15 @@ class H10(object):
     __slots__ = ("common", "window_mask_", "buckets_", "invalid_pos_",
                  "forest_")
 
-    def __init__(self, common, params):
-        # Initialize.  The C HasherSetup allocates buckets_ / forest_
-        # (HashMemAllocInBytes) right before Initialize, using the
-        # one_shot / input_size of the first Prepare call; since that
-        # information is only passed to prepare() here, the allocation is
-        # done there (once).
+    def __init__(self, common, params, one_shot=False, input_size=0):
+        # HashMemAllocInBytes (allocation done by HasherSetup) + Initialize
         self.common = common
         self.window_mask_ = (1 << params.lgwin) - 1
         self.invalid_pos_ = (0 - self.window_mask_) & 0xFFFFFFFF
-        self.buckets_ = None
-        self.forest_ = None
-
-    def _hash_mem_alloc(self, one_shot, input_size):
-        """HashMemAllocInBytes + allocation."""
         num_nodes = self.window_mask_ + 1
         if one_shot and input_size < num_nodes:
             num_nodes = input_size
+        self.buckets_ = None
         # uint32_t[2 * num_nodes]; contents are never read before written.
         self.forest_ = array("I", bytes(8 * num_nodes))
 
@@ -148,8 +140,6 @@ class H10(object):
 
     def prepare(self, one_shot, input_size, data):
         """Prepare."""
-        if self.forest_ is None:
-            self._hash_mem_alloc(one_shot, input_size)
         self.buckets_ = [self.invalid_pos_] * BUCKET_SIZE
 
     def prepare_distance_cache(self, distance_cache):

@@ -141,8 +141,9 @@ def brotli_build_meta_block(ringbuffer, pos, mask, params, prev_byte,
     distance_histograms = [histogram_distance()
                            for _ in range(distance_histograms_size)]
 
+    mb.command_histograms_size = mb.command_split.num_types
     mb.command_histograms = [histogram_command()
-                             for _ in range(mb.command_split.num_types)]
+                             for _ in range(mb.command_histograms_size)]
 
     brotli_build_histograms_with_context(
         cmds, num_commands, mb.literal_split, mb.command_split,
@@ -150,12 +151,13 @@ def brotli_build_meta_block(ringbuffer, pos, mask, params, prev_byte,
         literal_context_modes, literal_histograms, mb.command_histograms,
         distance_histograms)
 
-    mb.literal_context_map = \
-        [0] * (mb.literal_split.num_types << BROTLI_LITERAL_CONTEXT_BITS)
+    mb.literal_context_map_size = \
+        mb.literal_split.num_types << BROTLI_LITERAL_CONTEXT_BITS
+    mb.literal_context_map = [0] * mb.literal_context_map_size
 
-    # mb->literal_histograms_size = out_size (the list is truncated to it).
+    # The out list is truncated to the returned out_size.
     mb.literal_histograms = []
-    brotli_cluster_histograms(
+    mb.literal_histograms_size = brotli_cluster_histograms(
         literal_histograms, literal_histograms_size,
         k_max_number_of_histograms, mb.literal_histograms,
         mb.literal_context_map)
@@ -169,13 +171,13 @@ def brotli_build_meta_block(ringbuffer, pos, mask, params, prev_byte,
                 mb.literal_context_map[(i << BROTLI_LITERAL_CONTEXT_BITS) +
                                        j] = mb.literal_context_map[i]
 
-    distance_context_map_size = \
+    mb.distance_context_map_size = \
         mb.distance_split.num_types << BROTLI_DISTANCE_CONTEXT_BITS
-    mb.distance_context_map = [0] * distance_context_map_size
+    mb.distance_context_map = [0] * mb.distance_context_map_size
 
-    # mb->distance_histograms_size = out_size (the list is truncated to it).
+    # The out list is truncated to the returned out_size.
     mb.distance_histograms = []
-    brotli_cluster_histograms(
-        distance_histograms, distance_context_map_size,
+    mb.distance_histograms_size = brotli_cluster_histograms(
+        distance_histograms, mb.distance_context_map_size,
         k_max_number_of_histograms, mb.distance_histograms,
         mb.distance_context_map)

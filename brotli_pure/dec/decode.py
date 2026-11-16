@@ -33,27 +33,20 @@ NEEDS_MORE_INPUT with no more input), and any trailing byte after the last
 meta-block raise ``BrotliError``.  Large-window streams are rejected
 (the binding never enables BROTLI_DECODER_PARAM_LARGE_WINDOW).
 
-Two deliberate short-cuts that do not change results:
-
-* When an insert or copy would make ``meta_block_remaining_len`` negative,
-  C keeps decoding until the next check (WriteRingBuffer /
-  METABLOCK_DONE), which always fails.  We fail immediately.
-* A command that consumes no input bits and emits a zero-length
-  transformed dictionary word leaves the decoder state unchanged except
-  for the block counters, so C repeats it until a block counter runs out
-  (up to 2**24 times).  We skip those identical iterations in one step
-  (see docs/notes/decoder.md).
+A deliberate short-cut that does not change results: when an insert or a
+copy would make ``meta_block_remaining_len`` negative, C keeps decoding until
+the next check (WriteRingBuffer / METABLOCK_DONE), which always fails.  We
+fail immediately.
 """
 
 import os
 
-from ..common.constants import MAX_WINDOW_BITS  # noqa: F401
 from ..common.context import CONTEXT_LOOKUP, context_lut
 from ..common.dictionary import (DATA as _DICT_DATA, OFFSETS_BY_LENGTH,
                                  SIZE_BITS_BY_LENGTH)
 from ..common.errors import BrotliError
 from ..common.transforms import RFC_TRANSFORMS, transform_dictionary_word
-from .bit_reader import BIT_MASK, BrotliBitReader, _overrun  # noqa: F401
+from .bit_reader import BIT_MASK, _overrun
 from .huffman import (HUFFMAN_MAX_CODE_LENGTH, HUFFMAN_MAX_SIZE_26,
                       HUFFMAN_MAX_SIZE_258, HUFFMAN_MAX_SIZE_272,
                       build_code_lengths_huffman_table, build_huffman_table,
@@ -695,7 +688,6 @@ def process_commands(s):
 
     while True:
         # CommandBegin
-        cmd_start_bits = (next_in << 3) - bit_pos
         if bl1 == 0:
             br.val, br.bit_pos, br.next_in = val, bit_pos, next_in
             decode_command_block_switch(s)
@@ -770,6 +762,11 @@ def process_commands(s):
                 bl0 -= n
                 if trivial:
                     tbl = literal_htree
+                    if not tbl[0] & 15:
+                        # 1-symbol code: every entry is the same 0-bit code,
+                        # so the n literals consume no input.
+                        out += bytes((tbl[0] >> 4,)) * n
+                        continue
                     for _ in range(n):
                         if bit_pos < 15:
                             if (next_in << 3) - bit_pos > last_bits:
@@ -817,13 +814,11 @@ def process_commands(s):
         # CommandPostDecodeLiterals
         if distance_code >= 0:
             # Implicit distance case.
-            explicit_distance = False
             distance_context = 0 if distance_code else 1
             dist_rb_idx -= 1
             distance_code = dist_rb[dist_rb_idx & 3]
         else:
             # Read distance code in the command, unless it was implicitly zero.
-            explicit_distance = True
             if bl2 == 0:
                 br.val, br.bit_pos, br.next_in = val, bit_pos, next_in
                 s.distance_context = distance_context
@@ -917,18 +912,6 @@ def process_commands(s):
                     remaining -= length
                     if remaining < 0:
                         _fail("FORMAT_BLOCK_LENGTH_1")
-                    if (length == 0 and insert_length == 0 and
-                            (next_in << 3) - bit_pos == cmd_start_bits):
-                        # No input consumed, no output produced, and the
-                        # state is unchanged except for the block counters:
-                        # the following commands up to the next block switch
-                        # are identical no-ops.  Skip them all at once.
-                        k = bl1
-                        if explicit_distance:
-                            if bl2 < k:
-                                k = bl2
-                            bl2 -= k
-                        bl1 -= k
                 else:
                     _fail("FORMAT_TRANSFORM")
             else:

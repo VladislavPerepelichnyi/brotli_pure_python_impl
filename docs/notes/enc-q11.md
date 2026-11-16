@@ -50,9 +50,28 @@ the oracle (default x86-64 target) does not do that.
 * BackwardMatch arrays are two parallel lists (`distance`,
   `length_and_code`); ZopfliNode arrays are struct-of-arrays with a single
   `u` list mirroring the C union (float cost, later int shortcut / next).
-* In `UpdateNodes` the per-length cost only depends on the copy length code,
-  so it is computed once per code run (identical values, fewer float
-  roundings in Python).
+* Performance restructurings that are provably output-identical (and were
+  re-verified against the C harnesses):
+  - `UpdateNodes`: the per-length cost only depends on the copy length code,
+    so it is computed once per run of lengths sharing a code;
+  - `UpdateNodes`, last-distance candidates: with no compound dictionary all
+    C rejection branches reduce to `0 < backward <= min(dictionary_start +
+    gap, max_distance)`; since `best_len` starts at `min_len - 1` for every
+    queue entry and only grows, and a candidate only acts if its match length
+    exceeds `best_len` (which implies the C "continuation" byte check), the
+    distinct candidates are pre-filtered once per position (match lengths
+    cached) and the per-entry loop is skipped when none qualifies;
+  - the 16 candidate distances of a queue entry are computed once, when the
+    entry is pushed;
+  - H10 `FindAllMatches`: the short-distance scan (`best_len <= 2`) finds
+    2-byte-prefix candidates with `bytearray.rfind` in the same descending
+    order (plain loop when the range wraps the ring buffer).
+* Speed (CPython 3.12, one core): roughly 50-120 us per input byte at
+  quality 11 (two Zopfli passes + block splitting with 10 iterations); e.g.
+  alice29.txt (152 kB) ~10 s, mapsdatazrh (286 kB) ~30 s.  The block
+  splitter's `FindBlocks` (O(length x num_histograms) per iteration, up to
+  100 histograms) dominates on binary data; its per-byte vector operations
+  are already done with C-level `map`/`min`/`max`.
 * H10's forest is an `array('I')` of `2 * num_nodes` entries as in C (for
   `lgwin = 24` and non-one-shot input that is 128 MiB, same as C).
 * Shared / compound / contextual dictionaries are not supported (not reachable

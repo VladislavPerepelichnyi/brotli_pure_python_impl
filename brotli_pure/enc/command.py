@@ -131,12 +131,12 @@ class Command(object):
                     self.cmd_prefix, self.dist_prefix))
 
 
-def init_command(self, dist, insertlen, copylen, copylen_code_delta,
-                 distance_code):
-    """InitCommand: initialises Command ``self`` in place.
+def init_command(dist, insertlen, copylen, copylen_code_delta, distance_code):
+    """InitCommand: returns a new, initialised Command.
 
     ``dist`` is a BrotliDistanceParams.  distance_code is e.g. 0 for
     same-as-last short code, or 16 for offset 1."""
+    self = Command.__new__(Command)
     # Don't rely on signed int representation, use honest casts.
     delta = copylen_code_delta & 0xFF
     self.insert_len = insertlen & 0xFFFFFFFF
@@ -153,24 +153,15 @@ def init_command(self, dist, insertlen, copylen, copylen_code_delta,
     return self
 
 
-def new_command(dist, insertlen, copylen, copylen_code_delta, distance_code):
-    """Allocates a Command and runs InitCommand on it."""
-    return init_command(Command(), dist, insertlen, copylen,
-                        copylen_code_delta, distance_code)
-
-
-def init_insert_command(self, insertlen):
-    """InitInsertCommand."""
+def init_insert_command(insertlen):
+    """InitInsertCommand: returns a new insert-only Command."""
+    self = Command.__new__(Command)
     self.insert_len = insertlen & 0xFFFFFFFF
     self.copy_len = 4 << 25
     self.dist_extra = 0
     self.dist_prefix = BROTLI_NUM_DISTANCE_SHORT_CODES
     self.cmd_prefix = get_length_code(insertlen, 4, False)
     return self
-
-
-def new_insert_command(insertlen):
-    return init_insert_command(Command(), insertlen)
 
 
 def command_restore_distance_code(self, dist):

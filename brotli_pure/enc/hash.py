@@ -221,7 +221,11 @@ def _hasher_class(type_):
 
 
 class Hasher(object):
-    """Hasher (hash.h): ``common`` + ``privat`` (the concrete hasher)."""
+    """Hasher (hash.h): ``common`` + ``privat`` (the concrete hasher).
+
+    Attribute lookups that miss on the wrapper are forwarded to ``privat``,
+    so ``hasher.find_all_matches(...)`` == ``hasher.privat.find_all_matches``
+    (C: ``FN(FindAllMatches)(&hasher->privat._H10, ...)``)."""
 
     __slots__ = ('common', 'privat')
 
@@ -229,6 +233,12 @@ class Hasher(object):
         # HasherInit
         self.common = HasherCommon()
         self.privat = None
+
+    def __getattr__(self, name):
+        privat = object.__getattribute__(self, 'privat')
+        if privat is None:
+            raise AttributeError(name)
+        return getattr(privat, name)
 
 
 def hasher_init(hasher=None):
@@ -257,7 +267,8 @@ def hasher_setup(hasher, params, data, position, input_size, is_last):
         common.dict_num_lookups = 0
         common.dict_num_matches = 0
         cls = _hasher_class(common.params.type)
-        hasher.privat = cls(common, params)
+        # HasherSize + Initialize: the hasher allocates its own tables.
+        hasher.privat = cls(common, params, one_shot, input_size)
         # HasherReset
         common.is_prepared = False
         common.is_setup = True

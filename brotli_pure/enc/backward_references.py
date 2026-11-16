@@ -8,7 +8,7 @@ list of 16 ints, mutated in place.
 """
 
 from ..common.context import CONTEXT_LOOKUP
-from .command import Command, init_command
+from .command import init_command
 from .hash import HasherSearchResult, BROTLI_SCORE_BASE
 from .params import brotli_max_backward_limit
 from .quality import (literal_spree_length_for_sparse_search,
@@ -152,9 +152,8 @@ def create_backward_references(num_bytes, position, ringbuffer,
                 dist_cache[1] = dist_cache[0]
                 dist_cache[0] = sr.distance
                 privat.prepare_distance_cache(dist_cache)
-            commands.append(init_command(Command(), dist, insert_length,
-                                         sr.len, sr.len_code_delta,
-                                         distance_code))
+            commands.append(init_command(dist, insert_length, sr.len,
+                                         sr.len_code_delta, distance_code))
             num_literals += insert_length
             insert_length = 0
             # Put the hash keys into the table, if there are enough bytes left.

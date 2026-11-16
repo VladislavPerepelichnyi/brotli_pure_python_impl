@@ -191,6 +191,39 @@ def test_build_meta_block_golden(key, lgwin, font, cmode):
     assert o == _lines(GOLDEN[key])
 
 
+def test_zopfli_lookup_tables():
+    """The hot-loop tables of backward_references_hq must agree with the
+    command.h helpers (a wrong copy-code run end once mis-costed last-distance
+    copies of >= 2118 bytes; only visible on large inputs)."""
+    from brotli_pure.enc import backward_references_hq as bh
+    from brotli_pure.enc import command
+    for l in range(2, 2118):
+        code = command.get_copy_length_code(l)
+        assert bh._COPY_CODE_TABLE[l] == code
+        end = bh._COPY_RUN_END[l]
+        assert l <= end <= 2117
+        assert command.get_copy_length_code(end) == code
+        assert command.get_copy_length_code(end + 1) != code
+    for n in list(range(0, 22594)) + [22594, 100000, 1 << 24]:
+        want = command.get_insert_length_code(n)
+        got = bh._INS_CODE_TABLE[n] if n < 22594 else 23
+        assert got == want
+    for use_last in (False, True):
+        for i in range(24):
+            for c in range(24):
+                assert bh._CMD_CODE[use_last][i][c] == \
+                    command.combine_length_codes(i, c, use_last)
+    assert bh.K_INS_EXTRA == tuple(command.get_insert_extra(i)
+                                   for i in range(24))
+    assert bh.K_COPY_EXTRA == tuple(command.get_copy_extra(i)
+                                    for i in range(24))
+    from brotli_pure.enc.prefix import prefix_encode_copy_distance
+    for npostfix, ndirect in ((0, 0), (1, 12), (2, 40), (3, 120)):
+        for d in list(range(0, 2000)) + [65535, 1 << 20, (1 << 24) + 7]:
+            assert bh._prefix_encode_copy_distance_code(d, ndirect, npostfix) \
+                == prefix_encode_copy_distance(d, ndirect, npostfix)[0]
+
+
 def _is_mostly_utf8_ref(data, min_fraction):
     """Straightforward transcription of BrotliIsMostlyUTF8."""
     from brotli_pure.enc.utf8_util import brotli_parse_as_utf8

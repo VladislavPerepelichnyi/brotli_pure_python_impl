@@ -468,13 +468,14 @@ def _evaluate_node(block_start, pos, max_backward_limit_, gap,
 
 # GetInsertLengthCode for insert lengths < 22594 (23 above).
 _INS_CODE_TABLE = tuple(_get_insert_length_code(i) for i in range(22594))
-# Last copy length with the same copy length code, for lengths < 2118.
+# Last copy length with the same copy length code, for lengths < 2118
+# (length 2117 is the last one with code 22; 2118 and above use code 23).
 _COPY_RUN_END = [0] * 2118
-for _l in range(2117, 1, -1):
+_COPY_RUN_END[2117] = 2117
+for _l in range(2116, 1, -1):
     _COPY_RUN_END[_l] = (_COPY_RUN_END[_l + 1]
-                         if _l + 1 < 2118 and
-                         _COPY_CODE_TABLE[_l + 1] == _COPY_CODE_TABLE[_l]
-                         else (_l if _l + 1 < 2118 else 1 << 62))
+                         if _COPY_CODE_TABLE[_l + 1] == _COPY_CODE_TABLE[_l]
+                         else _l)
 _COPY_RUN_END = tuple(_COPY_RUN_END)
 del _l
 # PrefixEncodeCopyDistance symbol cache: (ndirect, npostfix) -> {code: sym}.

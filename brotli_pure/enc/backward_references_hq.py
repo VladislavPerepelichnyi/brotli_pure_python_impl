@@ -25,7 +25,6 @@ from array import array
 
 from .command import init_command
 from .fast_log import fast_log2
-from .hash_to_binary_tree import MAX_NUM_MATCHES_H10  # noqa: F401 (doc)
 from .literal_cost import brotli_estimate_bit_costs_for_literals
 
 BROTLI_NUM_DISTANCE_SHORT_CODES = 16
@@ -890,7 +889,6 @@ def brotli_zopfli_compute_shortest_path(num_bytes, position, ringbuffer,
                                              ringbuffer_mask)
     queue = StartPosQueue()
     dictionary = None  # params->dictionary.contextual.dict[0] (built-in)
-    max_distance_limit = params.dist.max_distance  # noqa: F841
     hash_type_length = hasher.hash_type_length()
     i = 0
     while i + hash_type_length - 1 < num_bytes:

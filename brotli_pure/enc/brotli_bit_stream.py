@@ -5,8 +5,6 @@ There are no compression algorithms here, just the right ordering of bits to
 match the specs.  All functions take a ``BitWriter`` (write_bits.py) in place
 of the C ``(size_t* storage_ix, uint8_t* storage)`` pair.
 
-Not ported (only used by qualities 0-3): BrotliBuildAndStoreHuffmanTreeFast,
-BrotliStoreMetaBlockFast, BrotliStoreMetaBlockTrivial.
 """
 
 from ..common.context import CONTEXT_LOOKUP
@@ -14,13 +12,17 @@ from .command import (get_insert_length_code, get_copy_length_code,
                       kBrotliInsBase, kBrotliInsExtra, kBrotliCopyBase,
                       kBrotliCopyExtra, command_copy_len_code,
                       command_distance_context)
-from .entropy_encode import (brotli_create_huffman_tree,
+from .entropy_encode import (brotli_create_huffman_tree, brotli_set_depth,
+                             sort_huffman_tree_items,
                              brotli_convert_bit_depths_to_symbols,
                              brotli_write_huffman_tree,
                              BROTLI_CODE_LENGTH_CODES,
                              BROTLI_REPEAT_PREVIOUS_CODE_LENGTH,
                              BROTLI_REPEAT_ZERO_CODE_LENGTH)
-from .histogram import (BROTLI_NUM_LITERAL_SYMBOLS, BROTLI_NUM_COMMAND_SYMBOLS,
+from . import entropy_encode_static as _static
+from .histogram import (Histogram, histogram_literal, histogram_command,
+                        histogram_distance, BROTLI_NUM_LITERAL_SYMBOLS,
+                        BROTLI_NUM_COMMAND_SYMBOLS,
                         BROTLI_LITERAL_CONTEXT_BITS,
                         BROTLI_DISTANCE_CONTEXT_BITS)
 
@@ -30,6 +32,9 @@ BROTLI_MAX_BLOCK_TYPE_SYMBOLS = BROTLI_MAX_NUMBER_OF_BLOCK_TYPES + 2
 BROTLI_MAX_CONTEXT_MAP_SYMBOLS = BROTLI_MAX_NUMBER_OF_BLOCK_TYPES + 16
 
 MAX_HUFFMAN_TREE_SIZE = 2 * BROTLI_NUM_COMMAND_SYMBOLS + 1
+# The maximum size of Huffman dictionary for distances assuming that
+# NPOSTFIX = 0 and NDIRECT = 0.
+MAX_SIMPLE_DISTANCE_ALPHABET_SIZE = 140
 
 # _kBrotliPrefixCodeRanges (c/common/constants.c): (offset, nbits)
 kBrotliPrefixCodeRanges = (
@@ -318,6 +323,144 @@ def build_and_store_huffman_tree(histogram, histogram_length, alphabet_size,
         store_simple_huffman_tree(d, s4, count, max_bits, w)
     else:
         brotli_store_huffman_tree(d, histogram_length, tree, w)
+
+
+def _sort_huffman_tree_fast(v0, v1):
+    """SortHuffmanTree (brotli_bit_stream.c): by count only."""
+    return v0[0] < v1[0]
+
+
+def brotli_build_and_store_huffman_tree_fast(tree, histogram, histogram_total,
+                                             max_bits, depth, bits, w):
+    """BrotliBuildAndStoreHuffmanTreeFast."""
+    count = 0
+    symbols = [0, 0, 0, 0]
+    length = 0
+    total = histogram_total
+    while total != 0:
+        if histogram[length]:
+            if count < 4:
+                symbols[count] = length
+            count += 1
+            total -= histogram[length]
+        length += 1
+
+    if count <= 1:
+        w.write_bits(4, 1)
+        w.write_bits(max_bits, symbols[0])
+        depth[symbols[0]] = 0
+        bits[symbols[0]] = 0
+        return
+
+    for i in range(length):
+        depth[i] = 0
+    count_limit = 1
+    while True:
+        # Nodes are (total_count, index_left, index_right_or_value).
+        nodes = []
+        for l_ in range(length - 1, -1, -1):
+            if histogram[l_]:
+                if histogram[l_] >= count_limit:
+                    nodes.append((histogram[l_], -1, l_))
+                else:
+                    nodes.append((count_limit, -1, l_))
+        n = len(nodes)
+        sort_huffman_tree_items(nodes, n, _sort_huffman_tree_fast)
+        # The nodes are:
+        # [0, n): the sorted leaf nodes that we start with.
+        # [n]: we add a sentinel here.
+        # [n + 1, 2n): new parent nodes are added here, starting from
+        #              (n+1). These are naturally in ascending order.
+        # [2n]: we add a sentinel at the end as well.
+        # There will be (2n+1) elements at the end.
+        sentinel = (0xFFFFFFFF, -1, -1)
+        nodes.append(sentinel)
+        nodes.append(sentinel)
+        i = 0       # Points to the next leaf node.
+        j = n + 1   # Points to the next non-leaf node.
+        for k in range(n - 1, 0, -1):
+            if nodes[i][0] <= nodes[j][0]:
+                left = i
+                i += 1
+            else:
+                left = j
+                j += 1
+            if nodes[i][0] <= nodes[j][0]:
+                right = i
+                i += 1
+            else:
+                right = j
+                j += 1
+            # The sentinel node becomes the parent node.
+            nodes[-1] = (nodes[left][0] + nodes[right][0], left, right)
+            # Add back the last sentinel node.
+            nodes.append(sentinel)
+        pool_left = [t[1] for t in nodes]
+        pool_right = [t[2] for t in nodes]
+        if brotli_set_depth(2 * n - 1, pool_left, pool_right, depth, 14):
+            # We need to pack the Huffman tree in 14 bits. If this was not
+            # successful, add fake entities to the lowest values and retry.
+            break
+        count_limit *= 2
+    brotli_convert_bit_depths_to_symbols(depth, length, bits)
+    if count <= 4:
+        # value of 1 indicates a simple Huffman code
+        w.write_bits(2, 1)
+        w.write_bits(2, count - 1)  # NSYM - 1
+        # Sort
+        for i in range(count):
+            for j in range(i + 1, count):
+                if depth[symbols[j]] < depth[symbols[i]]:
+                    symbols[j], symbols[i] = symbols[i], symbols[j]
+        if count == 2:
+            w.write_bits(max_bits, symbols[0])
+            w.write_bits(max_bits, symbols[1])
+        elif count == 3:
+            w.write_bits(max_bits, symbols[0])
+            w.write_bits(max_bits, symbols[1])
+            w.write_bits(max_bits, symbols[2])
+        else:
+            w.write_bits(max_bits, symbols[0])
+            w.write_bits(max_bits, symbols[1])
+            w.write_bits(max_bits, symbols[2])
+            w.write_bits(max_bits, symbols[3])
+            # tree-select
+            w.write_bits(1, 1 if depth[symbols[0]] == 1 else 0)
+    else:
+        previous_value = 8
+        # Complex Huffman Tree
+        _static.store_static_code_length_code(w)
+        kZeroRepsDepth = _static.kZeroRepsDepth
+        kZeroRepsBits = _static.kZeroRepsBits
+        kCodeLengthDepth = _static.kCodeLengthDepth
+        kCodeLengthBits = _static.kCodeLengthBits
+        kNonZeroRepsDepth = _static.kNonZeroRepsDepth
+        kNonZeroRepsBits = _static.kNonZeroRepsBits
+        # Actual RLE coding.
+        i = 0
+        while i < length:
+            value = depth[i]
+            reps = 1
+            k = i + 1
+            while k < length and depth[k] == value:
+                reps += 1
+                k += 1
+            i += reps
+            if value == 0:
+                w.write_bits(kZeroRepsDepth[reps], kZeroRepsBits[reps])
+            else:
+                if previous_value != value:
+                    w.write_bits(kCodeLengthDepth[value], kCodeLengthBits[value])
+                    reps -= 1
+                if reps < 3:
+                    while reps != 0:
+                        reps -= 1
+                        w.write_bits(kCodeLengthDepth[value],
+                                     kCodeLengthBits[value])
+                else:
+                    reps -= 3
+                    w.write_bits(kNonZeroRepsDepth[reps], kNonZeroRepsBits[reps])
+                previous_value = value
 
 
 def _move_to_front_transform(v_in, v_size):
@@ -686,4 +829,140 @@ def brotli_store_uncompressed_meta_block(is_final_block, input_, position,
     if is_final_block:
         w.write_bits(1, 1)  # islast
         w.write_bits(1, 1)  # isempty
+        w.jump_to_byte_boundary()
+
+
+def _build_histograms(input_, start_pos, mask, commands, n_commands,
+                      lit_histo, cmd_histo, dist_histo):
+    """BuildHistograms (brotli_bit_stream.c)."""
+    pos = start_pos
+    lit = lit_histo.data
+    for i in range(n_commands):
+        cmd = commands[i]
+        cmd_histo.add(cmd.cmd_prefix)
+        for _ in range(cmd.insert_len):
+            lit[input_[pos & mask]] += 1
+            pos += 1
+        lit_histo.total_count += cmd.insert_len
+        copy_len = cmd.copy_len & 0x1FFFFFF
+        pos += copy_len
+        if copy_len and cmd.cmd_prefix >= 128:
+            dist_histo.add(cmd.dist_prefix & 0x3FF)
+
+
+def _store_data_with_huffman_codes(input_, start_pos, mask, commands,
+                                   n_commands, lit_depth, lit_bits, cmd_depth,
+                                   cmd_bits, dist_depth, dist_bits, w):
+    """StoreDataWithHuffmanCodes."""
+    pos = start_pos
+    write_bits = w.write_bits
+    for i in range(n_commands):
+        cmd = commands[i]
+        cmd_code = cmd.cmd_prefix
+        write_bits(cmd_depth[cmd_code], cmd_bits[cmd_code])
+        store_command_extra(cmd, w)
+        for _ in range(cmd.insert_len):
+            literal = input_[pos & mask]
+            write_bits(lit_depth[literal], lit_bits[literal])
+            pos += 1
+        copy_len = cmd.copy_len & 0x1FFFFFF
+        pos += copy_len
+        if copy_len and cmd_code >= 128:
+            dist_code = cmd.dist_prefix & 0x3FF
+            distnumextra = cmd.dist_prefix >> 10
+            distextra = cmd.dist_extra
+            write_bits(dist_depth[dist_code], dist_bits[dist_code])
+            write_bits(distnumextra, distextra)
+
+
+def brotli_store_meta_block_trivial(input_, start_pos, length, mask, is_last,
+                                    params, commands, n_commands, w):
+    """BrotliStoreMetaBlockTrivial (quality 3): one Huffman code per
+    category, no block splits / context modeling."""
+    num_distance_symbols = params.dist.alphabet_size_max
+    tree = None
+    store_compressed_meta_block_header(is_last, length, w)
+    lit_histo = histogram_literal()
+    cmd_histo = histogram_command()
+    dist_histo = histogram_distance()
+    _build_histograms(input_, start_pos, mask, commands, n_commands,
+                      lit_histo, cmd_histo, dist_histo)
+    w.write_bits(13, 0)
+    lit_depth = [0] * BROTLI_NUM_LITERAL_SYMBOLS
+    lit_bits = [0] * BROTLI_NUM_LITERAL_SYMBOLS
+    cmd_depth = [0] * BROTLI_NUM_COMMAND_SYMBOLS
+    cmd_bits = [0] * BROTLI_NUM_COMMAND_SYMBOLS
+    dist_depth = [0] * MAX_SIMPLE_DISTANCE_ALPHABET_SIZE
+    dist_bits = [0] * MAX_SIMPLE_DISTANCE_ALPHABET_SIZE
+    build_and_store_huffman_tree(lit_histo.data, BROTLI_NUM_LITERAL_SYMBOLS,
+                                 BROTLI_NUM_LITERAL_SYMBOLS, tree,
+                                 lit_depth, lit_bits, w)
+    build_and_store_huffman_tree(cmd_histo.data, BROTLI_NUM_COMMAND_SYMBOLS,
+                                 BROTLI_NUM_COMMAND_SYMBOLS, tree,
+                                 cmd_depth, cmd_bits, w)
+    build_and_store_huffman_tree(dist_histo.data,
+                                 MAX_SIMPLE_DISTANCE_ALPHABET_SIZE,
+                                 num_distance_symbols, tree,
+                                 dist_depth, dist_bits, w)
+    _store_data_with_huffman_codes(input_, start_pos, mask, commands,
+                                   n_commands, lit_depth, lit_bits,
+                                   cmd_depth, cmd_bits, dist_depth, dist_bits,
+                                   w)
+    if is_last:
+        w.jump_to_byte_boundary()
+
+
+def brotli_store_meta_block_fast(input_, start_pos, length, mask, is_last,
+                                 params, commands, n_commands, w):
+    """BrotliStoreMetaBlockFast (quality 2)."""
+    num_distance_symbols = params.dist.alphabet_size_max
+    distance_alphabet_bits = (num_distance_symbols - 1).bit_length()
+    tree = None
+    store_compressed_meta_block_header(is_last, length, w)
+    w.write_bits(13, 0)
+    lit_depth = [0] * BROTLI_NUM_LITERAL_SYMBOLS
+    lit_bits = [0] * BROTLI_NUM_LITERAL_SYMBOLS
+    if n_commands <= 128:
+        histogram = [0] * BROTLI_NUM_LITERAL_SYMBOLS
+        pos = start_pos
+        num_literals = 0
+        for i in range(n_commands):
+            cmd = commands[i]
+            for _ in range(cmd.insert_len):
+                histogram[input_[pos & mask]] += 1
+                pos += 1
+            num_literals += cmd.insert_len
+            pos += cmd.copy_len & 0x1FFFFFF
+        brotli_build_and_store_huffman_tree_fast(
+            tree, histogram, num_literals, 8, lit_depth, lit_bits, w)
+        _static.store_static_command_huffman_tree(w)
+        _static.store_static_distance_huffman_tree(w)
+        _store_data_with_huffman_codes(
+            input_, start_pos, mask, commands, n_commands, lit_depth,
+            lit_bits, _static.kStaticCommandCodeDepth,
+            _static.kStaticCommandCodeBits, _static.kStaticDistanceCodeDepth,
+            _static.kStaticDistanceCodeBits, w)
+    else:
+        lit_histo = histogram_literal()
+        cmd_histo = histogram_command()
+        dist_histo = histogram_distance()
+        _build_histograms(input_, start_pos, mask, commands, n_commands,
+                          lit_histo, cmd_histo, dist_histo)
+        cmd_depth = [0] * BROTLI_NUM_COMMAND_SYMBOLS
+        cmd_bits = [0] * BROTLI_NUM_COMMAND_SYMBOLS
+        dist_depth = [0] * MAX_SIMPLE_DISTANCE_ALPHABET_SIZE
+        dist_bits = [0] * MAX_SIMPLE_DISTANCE_ALPHABET_SIZE
+        brotli_build_and_store_huffman_tree_fast(
+            tree, lit_histo.data, lit_histo.total_count, 8, lit_depth,
+            lit_bits, w)
+        brotli_build_and_store_huffman_tree_fast(
+            tree, cmd_histo.data, cmd_histo.total_count, 10, cmd_depth,
+            cmd_bits, w)
+        brotli_build_and_store_huffman_tree_fast(
+            tree, dist_histo.data, dist_histo.total_count,
+            distance_alphabet_bits, dist_depth, dist_bits, w)
+        _store_data_with_huffman_codes(
+            input_, start_pos, mask, commands, n_commands, lit_depth,
+            lit_bits, cmd_depth, cmd_bits, dist_depth, dist_bits, w)
+    if is_last:
         w.jump_to_byte_boundary()

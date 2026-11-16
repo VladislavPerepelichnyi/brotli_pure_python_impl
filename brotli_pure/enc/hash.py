@@ -202,6 +202,9 @@ def _hasher_class(type_):
     if type_ == 10:
         from .hash_to_binary_tree import H10
         return H10
+    if type_ in (2, 3, 4, 54):
+        from . import hash_longest_match_quickly as m
+        return getattr(m, 'H%d' % type_)
     if type_ == 5:
         from .hash_longest_match import H5
         return H5

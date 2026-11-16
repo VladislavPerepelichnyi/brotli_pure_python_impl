@@ -323,7 +323,10 @@ def zopfli_cost_model_set_from_literal_costs(model, position, ringbuffer,
 
 
 # --- StartPosQueue ---------------------------------------------------------
-# PosData is a tuple (pos, distance_cache (4-tuple), costdiff, cost).
+# PosData is a tuple (pos, distance_cache (4-tuple), costdiff, cost,
+# backwards) where ``backwards`` caches the 16 candidate distances
+# distance_cache[kDistanceCacheIndex[j]] + kDistanceCacheOffset[j] used by
+# UpdateNodes (pure function of distance_cache).
 
 class StartPosQueue(object):
     """Maintains the smallest 8 cost difference together with their
@@ -391,18 +394,20 @@ def _compute_distance_shortcut(block_start, pos, max_backward_limit_, gap,
     if pos == 0:
         return 0
     c_len = nodes.length[pos] & 0x1FFFFFF
-    i_len = nodes.dcode_insert_length[pos] & 0x7FFFFFF
+    dil = nodes.dcode_insert_length[pos]
     dist = nodes.distance[pos]
     # Since |block_start + pos| is the end position of the command, the copy
     # part starts from |block_start + pos - c_len|. Distances that are greater
     # than this or greater than |max_backward_limit| + |gap| are static
     # dictionary references, and do not update the last distances.
     # Also distance code 0 (last distance) does not update the last distances.
+    # (ZopfliNodeDistanceCode(&nodes[pos]) > 0 <=> short code != 1, since a
+    # zero short code yields dist + 15 > 0.)
     if (dist + c_len <= block_start + pos + gap and
             dist <= max_backward_limit_ + gap and
-            _zopfli_node_distance_code(nodes, pos) > 0):
+            (dil >> 27) != 1):
         return pos
-    return nodes.u[pos - c_len - i_len]
+    return nodes.u[pos - c_len - (dil & 0x7FFFFFF)]
 
 
 def _compute_distance_cache(pos, starting_dist_cache, nodes):
@@ -412,17 +417,18 @@ def _compute_distance_cache(pos, starting_dist_cache, nodes):
     nodes[0..pos]."""
     dist_cache = []
     u = nodes.u
+    n_dil = nodes.dcode_insert_length
+    n_length = nodes.length
+    n_distance = nodes.distance
     p = u[pos]
-    while len(dist_cache) < 4 and p > 0:
-        i_len = nodes.dcode_insert_length[p] & 0x7FFFFFF
-        c_len = nodes.length[p] & 0x1FFFFFF
-        dist_cache.append(nodes.distance[p])
+    idx = 0
+    while idx < 4 and p > 0:
+        dist_cache.append(n_distance[p])
+        idx += 1
         # Because of prerequisite, p >= c_len + i_len >= 2.
-        p = u[p - c_len - i_len]
-    k = 0
-    while len(dist_cache) < 4:
-        dist_cache.append(starting_dist_cache[k])
-        k += 1
+        p = u[p - (n_length[p] & 0x1FFFFFF) - (n_dil[p] & 0x7FFFFFF)]
+    if idx < 4:
+        dist_cache.extend(starting_dist_cache[:4 - idx])
     return tuple(dist_cache)
 
 
@@ -436,18 +442,49 @@ def _evaluate_node(block_start, pos, max_backward_limit_, gap,
     u[pos] = _compute_distance_shortcut(block_start, pos, max_backward_limit_,
                                         gap, nodes)
     lc = model.literal_costs_
-    lit = _f32(lc[pos] - lc[0])
+    f = _F32
+    f[0] = lc[pos] - lc[0]
+    lit = f[0]
     if node_cost <= lit:
-        costdiff = _f32(node_cost - lit)
-        queue.push((pos,
-                    _compute_distance_cache(pos, starting_dist_cache, nodes),
-                    costdiff, node_cost))
+        f[0] = node_cost - lit
+        dc = _compute_distance_cache(pos, starting_dist_cache, nodes)
+        d0 = dc[0]
+        d1 = dc[1]
+        backwards = (d0, d1, dc[2], dc[3], d0 - 1, d0 + 1, d0 - 2, d0 + 2,
+                     d0 - 3, d0 + 3, d1 - 1, d1 + 1, d1 - 2, d1 + 2, d1 - 3,
+                     d1 + 3)
+        queue.push((pos, dc, f[0], node_cost, backwards))
+
+
+# GetInsertLengthCode for insert lengths < 22594 (23 above).
+_INS_CODE_TABLE = tuple(_get_insert_length_code(i) for i in range(22594))
+# Last copy length with the same copy length code, for lengths < 2118.
+_COPY_RUN_END = [0] * 2118
+for _l in range(2117, 1, -1):
+    _COPY_RUN_END[_l] = (_COPY_RUN_END[_l + 1]
+                         if _l + 1 < 2118 and
+                         _COPY_CODE_TABLE[_l + 1] == _COPY_CODE_TABLE[_l]
+                         else (_l if _l + 1 < 2118 else 1 << 62))
+_COPY_RUN_END = tuple(_COPY_RUN_END)
+del _l
+# PrefixEncodeCopyDistance symbol cache: (ndirect, npostfix) -> {code: sym}.
+_DIST_SYMBOL_CACHE = {}
 
 
 def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
                   params, max_backward_limit_, starting_dist_cache,
                   num_matches, m_dist, m_lac, match_off, model, queue, nodes):
-    """UpdateNodes: returns longest copy length."""
+    """UpdateNodes: returns longest copy length.
+
+    Equivalent restructuring of the C loops (results are identical):
+    * last-distance candidates: every rejection branch of the C code is a
+      plain ``continue``; without compound dictionary (gap == 0) a candidate
+      is examined iff 0 < backward <= min(dictionary_start + gap,
+      max_distance) (non-positive ints become huge size_t values in C);
+    * the cost of a copy only depends on its copy length code, so the length
+      loops evaluate it once per run of lengths sharing a code;
+    * the match length of a candidate distance does not depend on the queue
+      entry, so it is cached per position."""
     stream_offset = params.stream_offset
     cur_ix = block_start + pos
     cur_ix_masked = cur_ix & ringbuffer_mask
@@ -457,8 +494,9 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
     if dictionary_start > max_backward_limit_:
         dictionary_start = max_backward_limit_
     max_len = num_bytes - pos
-    max_zopfli_len_ = max_zopfli_len(params)
-    max_iters = max_zopfli_candidates(params)
+    max_zopfli_len_ = (MAX_ZOPFLI_LEN_QUALITY_10 if params.quality <= 10
+                       else MAX_ZOPFLI_LEN_QUALITY_11)
+    max_iters = 1 if params.quality <= 10 else 5
     result = 0
     gap = 0  # params->dictionary.compound.total_size (no compound dict)
 
@@ -474,9 +512,14 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
     n_distance = nodes.distance
     n_dil = nodes.dcode_insert_length
     copy_code_table = _COPY_CODE_TABLE
+    copy_run_end = _COPY_RUN_END
     copy_extra = K_COPY_EXTRA
+    rb = ringbuffer
+    mask = ringbuffer_mask
+    q = queue.q_
+    qidx = queue.idx_
 
-    posdata = queue.at(0)
+    posdata = q[-qidx & 7]
     f[0] = posdata[3] + model.min_cost_cmd_
     t = f[0]
     f[0] = lc[pos] - lc[posdata[0]]
@@ -486,106 +529,135 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
     f[0] = lc[pos] - lc[0]
     lit_cost_pos = f[0]
 
-    ndirect = params.dist.num_direct_distance_codes
-    npostfix = params.dist.distance_postfix_bits
+    # Candidate distances must satisfy 0 < backward <= cand_limit.
+    cand_limit = dictionary_start + gap
+    if max_distance < cand_limit:
+        cand_limit = max_distance
+
+    qsize = qidx if qidx < 8 else 8
+    if qsize > max_iters:
+        qsize = max_iters
+
+    # Pre-filter the distinct last-distance candidates of all examined queue
+    # entries.  best_len starts at bl0 = min_len - 1 for every entry and only
+    # grows, and a candidate only has an effect if its match length exceeds
+    # best_len (which implies the C "continuation" byte check passes) and
+    # prev_ix + best_len <= mask.  Candidates failing at bl0 can never have an
+    # effect; the match length of the others is cached (it does not depend on
+    # the queue entry).
+    match_len_cache = {}
+    any_candidate = False
+    bl0 = min_len - 1
+    if bl0 < max_len and cur_ix_masked + bl0 <= mask:
+        cont = rb[cur_ix_masked + bl0]
+        if qsize == 1:
+            cands = posdata[4]
+        else:
+            cands = set(posdata[4])
+            for k in range(1, qsize):
+                cands.update(q[(k - qidx) & 7][4])
+        for backward in cands:
+            if 0 < backward <= cand_limit:
+                prev_ix = (cur_ix - backward) & mask
+                if prev_ix + bl0 <= mask and rb[prev_ix + bl0] == cont:
+                    ln = _find_match_length(rb, prev_ix, cur_ix_masked,
+                                            max_len)
+                    if ln > bl0:
+                        match_len_cache[backward] = ln
+                        any_candidate = True
 
     # Go over the command starting positions in order of increasing cost
     # difference.
-    qsize = queue.size()
-    k = 0
-    while k < max_iters and k < qsize:
-        posdata = queue.at(k)
+    for k in range(qsize):
+        posdata = q[(k - qidx) & 7]
         start = posdata[0]
-        inscode = _get_insert_length_code(pos - start)
-        start_costdiff = posdata[2]
-        f[0] = start_costdiff + K_INS_EXTRA[inscode]
+        ins_bits = pos - start
+        inscode = _INS_CODE_TABLE[ins_bits] if ins_bits < 22594 else 23
+        f[0] = posdata[2] + K_INS_EXTRA[inscode]
         f[0] = f[0] + lit_cost_pos
         base_cost = f[0]
-        cmd_codes_last = _CMD_CODE[1][inscode]
         cmd_codes = _CMD_CODE[0][inscode]
-        ins_bits = pos - start
 
         # Look for last distance matches using the distance cache from this
         # starting position.
-        best_len = min_len - 1
-        dcache = posdata[1]
-        for j in range(BROTLI_NUM_DISTANCE_SHORT_CODES):
-            if best_len >= max_len:
-                break
-            backward = dcache[K_DISTANCE_CACHE_INDEX[j]] + \
-                K_DISTANCE_CACHE_OFFSET[j]
-            prev_ix = cur_ix - backward
-            if cur_ix_masked + best_len > ringbuffer_mask:
-                break
-            continuation = ringbuffer[cur_ix_masked + best_len]
-            if backward <= 0:
-                # (size_t) of a non-positive int: either huge (word dictionary
-                # -> ignore) or prev_ix >= cur_ix.
-                continue
-            if backward > dictionary_start + gap:
-                # Word dictionary -> ignore.
-                continue
-            if backward <= max_distance:
-                # Regular backward reference.
-                prev_ix &= ringbuffer_mask
-                if (prev_ix + best_len > ringbuffer_mask or
-                        continuation != ringbuffer[prev_ix + best_len]):
+        best_len = bl0
+        if any_candidate:
+            get_len = match_len_cache.get
+            j = -1
+            for backward in posdata[4]:
+                j += 1
+                if best_len >= max_len or cur_ix_masked + best_len > mask:
+                    break
+                ln = get_len(backward)
+                if ln is None or ln <= best_len:
                     continue
-                ln = _find_match_length(ringbuffer, prev_ix, cur_ix_masked,
-                                        max_len)
-            else:
-                # "Gray" area (or compound dictionary, unsupported). It is
-                # addressable by decoder, but this encoder instance does not
-                # have that data -> should not touch it.
-                continue
-            f[0] = base_cost + cost_dist[j]
-            dist_cost = f[0]
-            codes = cmd_codes_last if j == 0 else cmd_codes
-            short_code_bits = (j + 1) << 27
-            prev_copycode = -1
-            cost = 0.0
-            for l in range(best_len + 1, ln + 1):
-                copycode = copy_code_table[l] if l < 2118 else 23
-                if copycode != prev_copycode:
-                    prev_copycode = copycode
+                prev_ix = (cur_ix - backward) & mask
+                if prev_ix + best_len > mask:
+                    continue
+                f[0] = base_cost + cost_dist[j]
+                dist_cost = f[0]
+                codes = _CMD_CODE[1][inscode] if j == 0 else cmd_codes
+                dil = ((j + 1) << 27) | ins_bits
+                l = best_len + 1
+                while l <= ln:
+                    if l < 2118:
+                        copycode = copy_code_table[l]
+                        run_end = copy_run_end[l]
+                        if run_end > ln:
+                            run_end = ln
+                    else:
+                        copycode = 23
+                        run_end = ln
                     cmdcode = codes[copycode]
                     f[0] = (base_cost if cmdcode < 128 else dist_cost) + \
                         copy_extra[copycode]
                     f[0] = f[0] + cost_cmd[cmdcode]
                     cost = f[0]
-                nxt = pos + l
-                if cost < u[nxt]:
-                    # UpdateZopfliNode(nodes, pos, start, l, l, backward,
-                    #                  j + 1, cost)
-                    n_length[nxt] = l | (9 << 25)
-                    n_distance[nxt] = backward
-                    n_dil[nxt] = short_code_bits | ins_bits
-                    u[nxt] = cost
-                    if l > result:
-                        result = l
-            if ln > best_len:
+                    for nxt in range(pos + l, pos + run_end + 1):
+                        if cost < u[nxt]:
+                            # UpdateZopfliNode(nodes, pos, start, l, l,
+                            #                  backward, j + 1, cost)
+                            ll = nxt - pos
+                            n_length[nxt] = ll | (9 << 25)
+                            n_distance[nxt] = backward
+                            n_dil[nxt] = dil
+                            u[nxt] = cost
+                            if ll > result:
+                                result = ll
+                    l = run_end + 1
                 best_len = ln
 
         # At higher iterations look only for new last distance matches, since
         # looking only for new command start positions with the same distances
         # does not help much.
         if k >= 2:
-            k += 1
             continue
 
         # Loop through all possible copy lengths at this position.
         ln = min_len
-        for j in range(match_off, match_off + num_matches):
-            dist = m_dist[j]
-            lac = m_lac[j]
+        for jj in range(match_off, match_off + num_matches):
+            dist = m_dist[jj]
+            lac = m_lac[jj]
             is_dictionary_match = dist > dictionary_start + gap
             # We already tried all possible last distance matches, so we can
             # use normal distance code here.
             dist_code = dist + BROTLI_NUM_DISTANCE_SHORT_CODES - 1
-            dist_symbol = _prefix_encode_copy_distance_code(
-                dist_code, ndirect, npostfix)
-            distnumextra = dist_symbol >> 10
-            f[0] = base_cost + distnumextra
+            sym_cache = _DIST_SYMBOL_CACHE.get(
+                (params.dist.num_direct_distance_codes,
+                 params.dist.distance_postfix_bits))
+            if sym_cache is None:
+                sym_cache = {}
+                _DIST_SYMBOL_CACHE[(params.dist.num_direct_distance_codes,
+                                    params.dist.distance_postfix_bits)] = \
+                    sym_cache
+            dist_symbol = sym_cache.get(dist_code)
+            if dist_symbol is None:
+                dist_symbol = _prefix_encode_copy_distance_code(
+                    dist_code, params.dist.num_direct_distance_codes,
+                    params.dist.distance_postfix_bits)
+                if len(sym_cache) < (1 << 20):
+                    sym_cache[dist_code] = dist_symbol
+            f[0] = base_cost + (dist_symbol >> 10)
             f[0] = f[0] + cost_dist[dist_symbol & 0x3FF]
             dist_cost = f[0]
 
@@ -597,26 +669,20 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
             if ln < max_match_len and (is_dictionary_match or
                                        max_match_len > max_zopfli_len_):
                 ln = max_match_len
+            if ln > max_match_len:
+                continue
             if is_dictionary_match:
+                # BackwardMatchLengthCode; only len == max_match_len is tried.
                 code = lac & 31
                 len_code = code if code else max_match_len
-            prev_copycode = -1
-            cost = 0.0
-            while ln <= max_match_len:
-                if not is_dictionary_match:
-                    len_code = ln
                 copycode = copy_code_table[len_code] if len_code < 2118 \
                     else 23
-                if copycode != prev_copycode:
-                    prev_copycode = copycode
-                    cmdcode = cmd_codes[copycode]
-                    f[0] = dist_cost + copy_extra[copycode]
-                    f[0] = f[0] + cost_cmd[cmdcode]
-                    cost = f[0]
+                cmdcode = cmd_codes[copycode]
+                f[0] = dist_cost + copy_extra[copycode]
+                f[0] = f[0] + cost_cmd[cmdcode]
+                cost = f[0]
                 nxt = pos + ln
                 if cost < u[nxt]:
-                    # UpdateZopfliNode(nodes, pos, start, len, len_code, dist,
-                    #                  0, cost)
                     n_length[nxt] = ln | ((ln + 9 - len_code) << 25)
                     n_distance[nxt] = dist
                     n_dil[nxt] = ins_bits
@@ -624,7 +690,32 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
                     if ln > result:
                         result = ln
                 ln += 1
-        k += 1
+                continue
+            while ln <= max_match_len:
+                if ln < 2118:
+                    copycode = copy_code_table[ln]
+                    run_end = copy_run_end[ln]
+                    if run_end > max_match_len:
+                        run_end = max_match_len
+                else:
+                    copycode = 23
+                    run_end = max_match_len
+                cmdcode = cmd_codes[copycode]
+                f[0] = dist_cost + copy_extra[copycode]
+                f[0] = f[0] + cost_cmd[cmdcode]
+                cost = f[0]
+                for nxt in range(pos + ln, pos + run_end + 1):
+                    if cost < u[nxt]:
+                        # UpdateZopfliNode(nodes, pos, start, len, len, dist,
+                        #                  0, cost)
+                        ll = nxt - pos
+                        n_length[nxt] = ll | (9 << 25)
+                        n_distance[nxt] = dist
+                        n_dil[nxt] = ins_bits
+                        u[nxt] = cost
+                        if ll > result:
+                            result = ll
+                ln = run_end + 1
     return result
 
 

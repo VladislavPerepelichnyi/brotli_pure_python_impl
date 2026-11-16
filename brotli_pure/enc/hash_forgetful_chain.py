@@ -25,7 +25,7 @@ class HashForgetfulChain(object):
     BANK_BITS = 16
     NUM_LAST_DISTANCES_TO_CHECK = 4
 
-    def __init__(self, common, params):
+    def __init__(self, common, params, one_shot=False, input_size=0):
         # FN(Initialize)
         self.common = common
         self.max_hops = (7 if params.quality > 6 else 8) << (params.quality - 4)

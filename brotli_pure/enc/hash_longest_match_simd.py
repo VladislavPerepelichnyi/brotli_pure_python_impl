@@ -25,7 +25,7 @@ _LAST_DISTANCE_BONUS = BROTLI_SCORE_BASE + 15
 class H58(object):
     """HashLongestMatch (SIMD variant), 32-bit multiplicative hash of 4 bytes."""
 
-    def __init__(self, common, params):
+    def __init__(self, common, params, one_shot=False, input_size=0):
         # FN(Initialize)
         self.common = common
         self.hash_shift = 32 - common.params.bucket_bits - TAG_HASH_BITS

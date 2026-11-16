@@ -55,14 +55,17 @@ def _ensure_capacity(lst, n, fill=0):
 
 
 class MetaBlockSplit(object):
-    """MetaBlockSplit (metablock.h).  ``*_size`` fields of C equal the list
-    lengths (``literal_context_map_size == len(literal_context_map)``, ...),
-    but are also available as properties."""
+    """MetaBlockSplit (metablock.h).  Context maps are lists of ints and
+    histogram arrays are lists of Histogram; as in C the ``*_size`` fields
+    are explicit and must be kept in sync by the producer (they normally
+    equal the list lengths)."""
 
     __slots__ = ('literal_split', 'command_split', 'distance_split',
-                 'literal_context_map', 'distance_context_map',
-                 'literal_histograms', 'command_histograms',
-                 'distance_histograms')
+                 'literal_context_map', 'literal_context_map_size',
+                 'distance_context_map', 'distance_context_map_size',
+                 'literal_histograms', 'literal_histograms_size',
+                 'command_histograms', 'command_histograms_size',
+                 'distance_histograms', 'distance_histograms_size')
 
     def __init__(self):
         # InitMetaBlockSplit
@@ -70,30 +73,15 @@ class MetaBlockSplit(object):
         self.command_split = BlockSplit()
         self.distance_split = BlockSplit()
         self.literal_context_map = []
+        self.literal_context_map_size = 0
         self.distance_context_map = []
+        self.distance_context_map_size = 0
         self.literal_histograms = []
+        self.literal_histograms_size = 0
         self.command_histograms = []
+        self.command_histograms_size = 0
         self.distance_histograms = []
-
-    @property
-    def literal_context_map_size(self):
-        return len(self.literal_context_map)
-
-    @property
-    def distance_context_map_size(self):
-        return len(self.distance_context_map)
-
-    @property
-    def literal_histograms_size(self):
-        return len(self.literal_histograms)
-
-    @property
-    def command_histograms_size(self):
-        return len(self.command_histograms)
-
-    @property
-    def distance_histograms_size(self):
-        return len(self.distance_histograms)
+        self.distance_histograms_size = 0
 
 
 def init_meta_block_split():
@@ -461,6 +449,7 @@ def _map_static_contexts(num_contexts, static_context_map, mb):
         for j in range(1 << BROTLI_LITERAL_CONTEXT_BITS):
             cmap[base + j] = offset + static_context_map[j]
     mb.literal_context_map = cmap
+    mb.literal_context_map_size = n
 
 
 def brotli_build_meta_block_greedy(ringbuffer, pos, mask, prev_byte,
@@ -528,6 +517,9 @@ def brotli_build_meta_block_greedy(ringbuffer, pos, mask, prev_byte,
     lit_blocks.finish_block(True)
     cmd_blocks.finish_block(True)
     dist_blocks.finish_block(True)
+    mb.literal_histograms_size = len(mb.literal_histograms)
+    mb.command_histograms_size = len(mb.command_histograms)
+    mb.distance_histograms_size = len(mb.distance_histograms)
 
     if num_contexts > 1:
         _map_static_contexts(num_contexts, static_context_map, mb)
@@ -536,11 +528,13 @@ def brotli_build_meta_block_greedy(ringbuffer, pos, mask, prev_byte,
 def brotli_optimize_histograms(num_distance_codes, mb):
     """BrotliOptimizeHistograms."""
     good_for_rle = None
-    for h in mb.literal_histograms:
-        brotli_optimize_huffman_counts_for_rle(256, h.data, good_for_rle)
-    for h in mb.command_histograms:
-        brotli_optimize_huffman_counts_for_rle(BROTLI_NUM_COMMAND_SYMBOLS,
-                                               h.data, good_for_rle)
-    for h in mb.distance_histograms:
-        brotli_optimize_huffman_counts_for_rle(num_distance_codes, h.data,
-                                               good_for_rle)
+    for i in range(mb.literal_histograms_size):
+        brotli_optimize_huffman_counts_for_rle(
+            256, mb.literal_histograms[i].data, good_for_rle)
+    for i in range(mb.command_histograms_size):
+        brotli_optimize_huffman_counts_for_rle(
+            BROTLI_NUM_COMMAND_SYMBOLS, mb.command_histograms[i].data,
+            good_for_rle)
+    for i in range(mb.distance_histograms_size):
+        brotli_optimize_huffman_counts_for_rle(
+            num_distance_codes, mb.distance_histograms[i].data, good_for_rle)

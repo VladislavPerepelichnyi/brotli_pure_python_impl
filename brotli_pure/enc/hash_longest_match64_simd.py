@@ -28,7 +28,7 @@ _SHIFT = 64 - 15 - TAG_HASH_BITS
 class H68(object):
     """HashLongestMatch (64-bit SIMD variant); bucket_bits is always 15."""
 
-    def __init__(self, common, params):
+    def __init__(self, common, params, one_shot=False, input_size=0):
         # FN(Initialize)
         self.common = common
         # Hash multiplier tuned to match length.

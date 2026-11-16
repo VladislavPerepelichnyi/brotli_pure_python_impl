@@ -240,5 +240,28 @@ def test_optional_quality_roundtrips_or_raises(quality):
         out = brotli_pure.compress(data, quality=quality)
     except (BrotliError, NotImplementedError):
         return
+    except ModuleNotFoundError as e:
+        if not (e.name or "").startswith("brotli_pure."):
+            raise
+        msg = ("quality %d raises ModuleNotFoundError(%s); an unsupported quality should raise "
+               "brotli_pure.error" % (quality, e.name))
+        if support.STRICT:
+            pytest.fail(msg)
+        pytest.skip(msg)
     assert type(out) is bytes
     assert o.decompress(out) == data
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("quality", [q for q in range(12) if q not in support.REQUIRED_QUALITIES])
+@pytest.mark.parametrize("name", ["empty", "short_quickfox", "english_text_1500", "random_1000",
+                                  "dict_dense_text_2000", "records_2400"])
+def test_optional_quality_byte_exact_if_supported(quality, name):
+    """If an optional quality is implemented, it should be as exact as 5/11."""
+    support.need_encoder(quality)
+    o = support.need_exact_oracle()
+    data = corpus.small()[name]
+    for lgwin in (10, 22):
+        out = brotli_pure.compress(data, quality=quality, lgwin=lgwin)
+        ref = o.compress(data, quality=quality, lgwin=lgwin)
+        assert out == ref, "q=%d lgwin=%d: %s" % (quality, lgwin, support.first_diff(out, ref))

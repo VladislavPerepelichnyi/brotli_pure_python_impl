@@ -418,6 +418,13 @@ def _():
     return StreamBuilder(16).compressed([Cmd(b"Z", copy=5000, dist=1)], last=True).finish()
 
 
+@case("max_mlen_16M_single_copy", slow=True)
+def _():
+    # MLEN = 2^24 (6 nibbles, all ones) produced by one overlapping copy.
+    return StreamBuilder(24).compressed([Cmd(b"Q", copy=(1 << 24) - 1, dist=1)],
+                                        last=True).finish()
+
+
 @case("overlapping_copy_distance3")
 def _():
     return StreamBuilder(16).compressed([Cmd(b"abc", copy=1000, dist=3), Cmd(b"!")],

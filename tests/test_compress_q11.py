@@ -50,3 +50,29 @@ def test_q11_all_single_bytes_byte_exact():
         if out != o.compress(b, quality=Q) or o.decompress(out) != b:
             bad.append(b)
     assert not bad, "single-byte inputs not byte-exact: %r" % bad[:10]
+
+
+COMBOS = [("small", "mixed_15000" if Q == 5 else "json_text_2500", w, 0, b)
+          for w, b in ((10, 24), (10, 16), (24, 16), (16, 24), (18, 18))]
+
+
+@pytest.mark.parametrize("check,tier,name,lgwin,mode,lgblock", params(COMBOS))
+def test_q11_lgwin_lgblock_combinations(check, tier, name, lgwin, mode, lgblock):
+    run_check(check, tier, name, Q, lgwin, mode, lgblock)
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("lgwin", (10, 24))
+def test_q11_short_lengths_byte_exact(lgwin):
+    """Every prefix length 0..160 of a text sample (header/last-block edge cases)."""
+    support.need_encoder(Q)
+    o = support.need_exact_oracle()
+    import brotli_pure
+    text = corpus.small()["english_text_1500"]
+    bad = []
+    for n in range(160 + 1):
+        d = text[:n]
+        out = brotli_pure.compress(d, quality=Q, lgwin=lgwin)
+        if out != o.compress(d, quality=Q, lgwin=lgwin) or o.decompress(out) != d:
+            bad.append(n)
+    assert not bad, "lengths not byte-exact: %r" % bad[:20]

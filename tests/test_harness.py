@@ -128,7 +128,7 @@ def test_dictionary_available():
 
 
 # Corpus determinism.  If you intentionally change corpus.py, update the hash.
-SMALL_CORPUS_SHA256 = "158eb750f1537e438dc07025aec8ccaeaf8ffb280a9860209f19ba1e561a9f6b"
+SMALL_CORPUS_SHA256 = "1072a6c9b7a4edc0d7fbabb244d5c09437703544acb59162143215433291eb37"
 
 
 def test_corpus_deterministic():

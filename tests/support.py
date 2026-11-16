@@ -79,6 +79,10 @@ def _decoder_status():
         return reason
     try:
         brotli_pure.decompress(b"\x06")  # canonical empty stream (WBITS=16)
+    except ModuleNotFoundError as e:
+        if (e.name or "").startswith("brotli_pure."):
+            return "decoder not implemented yet (%s missing)" % e.name
+        raise
     except NotImplementedError as e:
         return "decoder raises NotImplementedError: %s" % e
     except Exception:  # noqa: BLE001 - a broken decoder is *implemented*, tests will fail
@@ -93,6 +97,10 @@ def _encoder_status(quality):
         return reason
     try:
         brotli_pure.compress(b"probe", quality=quality)
+    except ModuleNotFoundError as e:
+        if (e.name or "").startswith("brotli_pure."):
+            return "quality %d not implemented yet (%s missing)" % (quality, e.name)
+        raise
     except NotImplementedError as e:
         return "quality %d not implemented (NotImplementedError: %s)" % (quality, e)
     except BrotliError as e:

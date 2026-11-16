@@ -303,6 +303,16 @@ def small():
     c["mixed_15000"] = mixed(15000, 23)
     c["all_bytes_ascending"] = bytes(range(256))
     c["all_bytes_x4_desc"] = bytes(range(255, -1, -1)) * 4
+    # Small variants of the structured kinds, so the (slow) quality-11 path
+    # sees them in the default run too.
+    c["records_2400"] = table_records(2400, 24)
+    c["le_int32_2000"] = le_ints(2000, 25)
+    c["pcm16_1200"] = pcm16(1200, 26)
+    c["utf8_multilingual_text_1200"] = utf8_text(1200, 27)
+    c["json_text_2500"] = json_like(2500, 28)
+    c["html_text_2500"] = html_like(2500, 29)
+    c["skewed_2000"] = skewed(2000, 30)
+    c["random_2900"] = random_bytes(2900, 31)
     return c
 
 
@@ -314,7 +324,9 @@ def tiny():
     names = ["empty", "short_a", "short_abc", "short_hello_world", "short_quickfox",
              "short_dict_words", "short_utf8", "zeros_17", "zeros_1000", "abc_pattern_2000",
              "random_255", "random_1000", "english_text_1500", "dict_dense_text_2000",
-             "long_repeat_gap_1000", "all_bytes_ascending"]
+             "long_repeat_gap_1000", "all_bytes_ascending", "records_2400", "le_int32_2000",
+             "pcm16_1200", "utf8_multilingual_text_1200", "json_text_2500", "html_text_2500",
+             "skewed_2000", "random_2900"]
     s = small()
     return {n: s[n] for n in names if len(s[n]) <= TINY_LIMIT}
 

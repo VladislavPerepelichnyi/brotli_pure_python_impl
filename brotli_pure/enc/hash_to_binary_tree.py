@@ -119,7 +119,7 @@ class H10(object):
             num_nodes = input_size
         self.buckets_ = None
         # uint32_t[2 * num_nodes]; contents are never read before written.
-        self.forest_ = array("I", bytes(8 * num_nodes))
+        self.forest_ = array("I", [0]) * (2 * num_nodes)
 
     @staticmethod
     def hash_type_length():
@@ -239,24 +239,48 @@ class H10(object):
         stop = cur_ix - short_match_max_backward
         if cur_ix < short_match_max_backward:
             stop = 0
-        c0 = data[cur_ix_masked]
-        c1 = data[cur_ix_masked + 1]
-        i = cur_ix - 1
-        while i > stop and best_len <= 2:
-            backward = cur_ix - i
-            if backward > max_backward:
-                break
-            prev_ix = i & ring_buffer_mask
-            if data[prev_ix] != c0 or data[prev_ix + 1] != c1:
-                i -= 1
-                continue
-            ln = find_match_length_with_limit(data, prev_ix, cur_ix_masked,
-                                              max_length)
-            if ln > best_len:
-                best_len = ln
-                m_dist.append(backward)
-                m_lac.append(ln << 5)
-            i -= 1
+        # for (i = cur_ix - 1; i > stop && best_len <= 2; --i): candidates
+        # whose first two bytes match, in decreasing order of i.  backward
+        # > max_backward breaks the loop, so i >= cur_ix - max_backward.
+        lo = stop + 1
+        if cur_ix - max_backward > lo:
+            lo = cur_ix - max_backward
+        hi = cur_ix - 1
+        if lo <= hi:
+            lo_m = lo & ring_buffer_mask
+            hi_m = hi & ring_buffer_mask
+            if lo_m <= hi_m:
+                # Contiguous in the ring buffer: locate the 2-byte prefix with
+                # rfind (data[prev_ix + 1] may be the tail copy, as in C).
+                pat = data[cur_ix_masked:cur_ix_masked + 2]
+                end = hi_m + 2
+                rfind = data.rfind
+                while best_len <= 2:
+                    prev_ix = rfind(pat, lo_m, end)
+                    if prev_ix < 0:
+                        break
+                    ln = find_match_length_with_limit(data, prev_ix,
+                                                      cur_ix_masked,
+                                                      max_length)
+                    if ln > best_len:
+                        best_len = ln
+                        m_dist.append(hi_m - prev_ix + 1)
+                        m_lac.append(ln << 5)
+                    end = prev_ix + 1
+            else:
+                c0 = data[cur_ix_masked]
+                c1 = data[cur_ix_masked + 1]
+                i = hi
+                while i >= lo and best_len <= 2:
+                    prev_ix = i & ring_buffer_mask
+                    if data[prev_ix] == c0 and data[prev_ix + 1] == c1:
+                        ln = find_match_length_with_limit(
+                            data, prev_ix, cur_ix_masked, max_length)
+                        if ln > best_len:
+                            best_len = ln
+                            m_dist.append(cur_ix - i)
+                            m_lac.append(ln << 5)
+                    i -= 1
         if best_len < max_length:
             best_len = self.store_and_find_matches(
                 data, cur_ix, ring_buffer_mask, max_length, max_backward,

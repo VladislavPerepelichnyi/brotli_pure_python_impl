@@ -439,8 +439,19 @@ def _evaluate_node(block_start, pos, max_backward_limit_, gap,
     u = nodes.u
     # Save cost, because ComputeDistanceCache invalidates it.
     node_cost = u[pos]
-    u[pos] = _compute_distance_shortcut(block_start, pos, max_backward_limit_,
-                                        gap, nodes)
+    # u[pos] = ComputeDistanceShortcut(block_start, pos, max_backward_limit,
+    #                                  gap, nodes)  (inlined)
+    if pos == 0:
+        u[0] = 0
+    else:
+        c_len = nodes.length[pos] & 0x1FFFFFF
+        dil = nodes.dcode_insert_length[pos]
+        dist = nodes.distance[pos]
+        if (dist + c_len <= block_start + pos + gap and
+                dist <= max_backward_limit_ + gap and (dil >> 27) != 1):
+            u[pos] = pos
+        else:
+            u[pos] = u[pos - c_len - (dil & 0x7FFFFFF)]
     lc = model.literal_costs_
     f = _F32
     f[0] = lc[pos] - lc[0]
@@ -566,6 +577,12 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
                         match_len_cache[backward] = ln
                         any_candidate = True
 
+    sym_key = (params.dist.num_direct_distance_codes,
+               params.dist.distance_postfix_bits)
+    sym_cache = _DIST_SYMBOL_CACHE.get(sym_key)
+    if sym_cache is None:
+        sym_cache = _DIST_SYMBOL_CACHE[sym_key] = {}
+
     # Go over the command starting positions in order of increasing cost
     # difference.
     for k in range(qsize):
@@ -642,14 +659,6 @@ def _update_nodes(num_bytes, block_start, pos, ringbuffer, ringbuffer_mask,
             # We already tried all possible last distance matches, so we can
             # use normal distance code here.
             dist_code = dist + BROTLI_NUM_DISTANCE_SHORT_CODES - 1
-            sym_cache = _DIST_SYMBOL_CACHE.get(
-                (params.dist.num_direct_distance_codes,
-                 params.dist.distance_postfix_bits))
-            if sym_cache is None:
-                sym_cache = {}
-                _DIST_SYMBOL_CACHE[(params.dist.num_direct_distance_codes,
-                                    params.dist.distance_postfix_bits)] = \
-                    sym_cache
             dist_symbol = sym_cache.get(dist_code)
             if dist_symbol is None:
                 dist_symbol = _prefix_encode_copy_distance_code(

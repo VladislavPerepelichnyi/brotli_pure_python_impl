@@ -81,6 +81,16 @@ def test_crafted_truncated_every_byte(case):
                                                what="decompress(prefix %d)" % n)
 
 
+def _model_trusted(stream, expected, label):
+    """If the oracle is present, make sure it agrees with the model first, so
+    a generator bug is reported as such and not as a decoder bug."""
+    if support.oracle is None:
+        return
+    ok, got = support.oracle_decompress(stream)
+    if not ok or got != expected:
+        pytest.fail("TEST HARNESS BUG: oracle disagrees with the bitstream model (%s)" % label)
+
+
 @pytest.mark.parametrize("seed", range(0, 200, 20))
 def test_random_crafted_streams(seed):
     """Random streams from the mini-encoder; expectation from the model."""
@@ -88,6 +98,7 @@ def test_random_crafted_streams(seed):
         stream, expected, desc = bs.random_stream(random.Random(50_000 + s))
         if expected is None or (bs.DICTIONARY is None and "C" in desc):
             continue
+        _model_trusted(stream, expected, "seed %d" % (50_000 + s))
         got = support.ours_decompress(stream, len(expected))
         support.assert_same_bytes(got, expected, "seed %d (%s)" % (50_000 + s, desc))
 
@@ -99,5 +110,6 @@ def test_random_crafted_streams_many(seed):
         stream, expected, desc = bs.random_stream(random.Random(90_000 + s), max_out=20_000)
         if expected is None:
             continue
+        _model_trusted(stream, expected, "seed %d" % (90_000 + s))
         got = support.ours_decompress(stream, len(expected))
         support.assert_same_bytes(got, expected, "seed %d (%s)" % (90_000 + s, desc))

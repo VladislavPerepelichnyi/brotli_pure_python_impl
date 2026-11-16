@@ -124,7 +124,9 @@ def test_decompress_random_crafted_stream(seed):
     assume(expected is not None)
     if bs.DICTIONARY is None:
         assume("C" not in desc)
+    if support.oracle is not None:  # keep the model honest
+        ok, ref = support.oracle_decompress(stream)
+        if not ok or ref != expected:
+            pytest.fail("TEST HARNESS BUG: oracle disagrees with the bitstream model (%s)" % desc)
     got = support.ours_decompress(stream, len(expected))
     support.assert_same_bytes(got, expected, desc)
-    if support.oracle is not None:  # keep the model honest
-        assert support.oracle.decompress(stream) == expected

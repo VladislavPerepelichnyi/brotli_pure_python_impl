@@ -29,7 +29,7 @@ import heapq
 import os
 
 from tests import support
-from tests.rfc_transforms import TRANSFORMS
+from tests.rfc_transforms import CONTEXT_LUT, TRANSFORMS
 
 # --------------------------------------------------------------------------
 # Format constants (RFC 7932)
@@ -616,34 +616,50 @@ class StreamBuilder:
     # -- compressed metablock ------------------------------------------------
     def compressed(self, cmds, last=False, npostfix=0, ndirect=0, context_mode=0,
                    force_complex=(), hskip=0, use_repeats=False, tree_select=None,
-                   lengths=None, nibbles=None, mlen_delta=0):
+                   lengths=None, nibbles=None, mlen_delta=0, blocks=None,
+                   context_modes=None, lit_cmap=None, dist_cmap=None, cmap_rle=None,
+                   cmap_imtf=None, rng=None):
         """Append a compressed metablock.
 
         force_complex: names among {'lit', 'cmd', 'dist'} that must use a
         complex prefix code; lengths: {'lit'|'cmd'|'dist': {sym: len}}
-        overrides; mlen_delta: corrupt MLEN on purpose."""
+        overrides (tree 0 only); mlen_delta: corrupt MLEN on purpose.
+
+        Block switching / context modelling (all optional):
+          blocks: {'lit'|'cmd'|'dist': [(type, count), ...] or
+                   callable(nsymbols) -> such a list}; first type must be 0.
+          context_modes: literal context mode per literal block type.
+          lit_cmap / dist_cmap: (values, ntrees) or callable(size) -> that;
+                   sizes are NBLTYPESL*64 and NBLTYPESD*4.
+          cmap_rle: {'lit'|'dist': RLEMAX 0..16}; cmap_imtf: {'lit'|'dist': bool}
+          rng: random.Random used to pick among equivalent block type codes.
+        """
         if ndirect % (1 << npostfix) or ndirect > (15 << npostfix):
             raise ValueError("bad NDIRECT for NPOSTFIX")
         snap = (bytearray(self.model.out), list(self.model.rb), self.invalid)
         try:
             return self._compressed(cmds, last, npostfix, ndirect, context_mode, force_complex,
-                                    hskip, use_repeats, tree_select, lengths, nibbles, mlen_delta)
+                                    hskip, use_repeats, tree_select, lengths, nibbles, mlen_delta,
+                                    blocks or {}, context_modes, lit_cmap, dist_cmap,
+                                    cmap_rle or {}, cmap_imtf or {}, rng)
         except ValueError:
             self.model.out, self.model.rb, self.invalid = snap
             raise
 
     def _compressed(self, cmds, last, npostfix, ndirect, context_mode, force_complex,
-                    hskip, use_repeats, tree_select, lengths, nibbles, mlen_delta):
+                    hskip, use_repeats, tree_select, lengths, nibbles, mlen_delta,
+                    blocks, context_modes, lit_cmap, dist_cmap, cmap_rle, cmap_imtf, rng):
         start = len(self.model.out)
         enc = []
         for i, c in enumerate(cmds):
             ic, iextra, ibits = insert_code(len(c.insert))
+            lit_pos = len(self.model.out)
             self.model.out += c.insert
             if not c.copy:
                 if i != len(cmds) - 1:
                     raise ValueError("insert-only command must be last")
                 sym = command_symbol(ic, 0, ic < 8)
-                enc.append((sym, (iextra, ibits), (0, 0), c.insert, None))
+                enc.append((sym, (iextra, ibits), (0, 0), c.insert, None, lit_pos, 0))
                 continue
             cc, cextra, cbits = copy_code(c.copy)
             if c.implicit:
@@ -673,7 +689,7 @@ class StreamBuilder:
                     self.model.out += bytes(c.copy)
             else:
                 self.model.out += bytes(c.copy)
-            enc.append((sym, (iextra, ibits), (cextra, cbits), c.insert, dsym))
+            enc.append((sym, (iextra, ibits), (cextra, cbits), c.insert, dsym, lit_pos, c.copy))
         mlen = len(self.model.out) - start
         mlen += mlen_delta
         if mlen_delta:
@@ -681,23 +697,110 @@ class StreamBuilder:
         if mlen < 1:
             raise ValueError("compressed metablock must produce >= 1 byte")
 
-        lengths = lengths or {}
-        lit_f, cmd_f, dist_f = {}, {}, {}
-        for sym, _, _, lits, dsym in enc:
-            cmd_f[sym] = cmd_f.get(sym, 0) + 1
-            for b in lits:
-                lit_f[b] = lit_f.get(b, 0) + 1
-            if dsym is not None:
-                dist_f[dsym[0]] = dist_f.get(dsym[0], 0) + 1
-        common = dict(hskip=hskip, use_repeats=use_repeats, tree_select=tree_select)
-        lit_code = PrefixCode(256, lit_f, force_complex="lit" in force_complex,
-                              lengths=lengths.get("lit"), **common)
-        cmd_code = PrefixCode(704, cmd_f, force_complex="cmd" in force_complex,
-                              lengths=lengths.get("cmd"), **common)
-        dist_code = PrefixCode(distance_alphabet_size(npostfix, ndirect), dist_f,
-                               force_complex="dist" in force_complex,
-                               lengths=lengths.get("dist"), **common)
+        # ---- block structure ---------------------------------------------
+        nsyms = {"lit": sum(len(e[3]) for e in enc), "cmd": len(enc),
+                 "dist": sum(1 for e in enc if e[4] is not None)}
+        blist, ntypes = {}, {}
+        for cat in CATS:
+            spec = blocks.get(cat)
+            if callable(spec):
+                spec = spec(nsyms[cat])
+            spec = list(spec) if spec else [(0, 1 << 24)]
+            if spec[0][0] != 0:
+                raise ValueError("first block type must be 0")
+            ntypes[cat] = max(t for t, _ in spec) + 1
+            # drop blocks that are never reached
+            used, total = [], 0
+            for t, n in spec:
+                if n < 1:
+                    raise ValueError("block count must be >= 1")
+                if used and total >= nsyms[cat]:
+                    break
+                used.append((t, n))
+                total += n
+            if total < nsyms[cat]:
+                raise ValueError("blocks for %s cover %d of %d symbols" % (cat, total, nsyms[cat]))
+            blist[cat] = used
+        nL, nD = ntypes["lit"], ntypes["dist"]
+        modes = list(context_modes) if context_modes is not None else [context_mode] * nL
+        if len(modes) < nL:
+            modes += [context_mode] * (nL - len(modes))
+        cmaps = {}
+        for cat, spec, size in (("lit", lit_cmap, nL * 64), ("dist", dist_cmap, nD * 4)):
+            if callable(spec):
+                spec = spec(size)
+            if spec is None:
+                spec = ([0] * size, 1)
+            values, ntrees = list(spec[0]), spec[1]
+            if len(values) != size or (values and max(values) >= ntrees) or not 1 <= ntrees <= 256:
+                raise ValueError("bad %s context map" % cat)
+            cmaps[cat] = (values, ntrees)
 
+        # ---- pass 1: event list ----------------------------------------
+        out = self.model.out
+        events = []
+        state = {cat: _BlockState(blist[cat], ntypes[cat], rng) for cat in CATS}
+
+        def symbol(cat):
+            st = state[cat]
+            if st.n >= 2 and st.remaining == 0:
+                tcode, (csym, cextra, cbits) = st.switch()
+                events.append(("btype", cat, tcode))
+                events.append(("bcount", cat, csym))
+                events.append(("raw", cextra, cbits))
+            st.remaining -= 1
+            return st.type
+
+        lit_values, lit_ntrees = cmaps["lit"]
+        dist_values, dist_ntrees = cmaps["dist"]
+        for sym, (iv, ib), (cv, cb), lits, dsym, lit_pos, copy_len in enc:
+            t = symbol("cmd")
+            events.append(("cmd", t, sym))
+            events.append(("raw", iv, ib))
+            events.append(("raw", cv, cb))
+            for k, byte in enumerate(lits):
+                t = symbol("lit")
+                pos = lit_pos + k
+                p1 = out[pos - 1] if pos >= 1 else 0
+                p2 = out[pos - 2] if pos >= 2 else 0
+                lut = CONTEXT_LUT[modes[t]]
+                ctx = lut[0][p1] | lut[1][p2]
+                events.append(("lit", lit_values[t * 64 + ctx], byte))
+            if dsym is not None:
+                t = symbol("dist")
+                dctx = min(copy_len, 5) - 2
+                events.append(("dist", dist_values[t * 4 + dctx], dsym[0]))
+                events.append(("raw", dsym[1], dsym[2]))
+
+        # ---- prefix codes ------------------------------------------------
+        freqs = {}
+        for ev in events:
+            if ev[0] != "raw":
+                key = (ev[0], ev[1])
+                f = freqs.setdefault(key, {})
+                f[ev[2]] = f.get(ev[2], 0) + 1
+        lengths = lengths or {}
+        common = dict(hskip=hskip, use_repeats=use_repeats, tree_select=tree_select)
+        groups = {"lit": (256, lit_ntrees), "cmd": (704, ntypes["cmd"]),
+                  "dist": (distance_alphabet_size(npostfix, ndirect), dist_ntrees)}
+        codes = {}
+        for g, (asize, ntrees) in groups.items():
+            for k in range(ntrees):
+                codes[(g, k)] = PrefixCode(asize, freqs.get((g, k), {}),
+                                           force_complex=g in force_complex,
+                                           lengths=lengths.get(g) if k == 0 else None, **common)
+        for cat in CATS:
+            if ntypes[cat] >= 2:
+                codes[("btype", cat)] = PrefixCode(ntypes[cat] + 2, freqs.get(("btype", cat), {}))
+                f = dict(freqs.get(("bcount", cat), {}))
+                first = _block_count_symbol(blist[cat][0][1])
+                f[first[0]] = f.get(first[0], 0) + 1
+                codes[("bcount", cat)] = PrefixCode(26, f)
+        cmap_writers = {cat: _ContextMapWriter(cmaps[cat][0], cmaps[cat][1], cmap_rle.get(cat, 0),
+                                               cmap_imtf.get(cat, False))
+                        for cat in ("lit", "dist")}
+
+        # ---- pass 2: write ---------------------------------------------
         w = self.w
         w.write(1 if last else 0, 1)
         if last:
@@ -705,26 +808,28 @@ class StreamBuilder:
         self._mlen(mlen, nibbles)
         if not last:
             w.write(0, 1)  # ISUNCOMPRESSED
-        w.write(0, 1)  # NBLTYPESL = 1
-        w.write(0, 1)  # NBLTYPESI = 1
-        w.write(0, 1)  # NBLTYPESD = 1
+        for cat in CATS:
+            write_varlen_uint8(w, ntypes[cat] - 1)
+            if ntypes[cat] >= 2:
+                codes[("btype", cat)].write(w)
+                codes[("bcount", cat)].write(w)
+                csym, cextra, cbits = _block_count_symbol(blist[cat][0][1])
+                codes[("bcount", cat)].emit(w, csym)
+                w.write(cextra, cbits)
         w.write(npostfix, 2)
         w.write(ndirect >> npostfix, 4)
-        w.write(context_mode, 2)
-        w.write(0, 1)  # NTREESL = 1
-        w.write(0, 1)  # NTREESD = 1
-        lit_code.write(w)
-        cmd_code.write(w)
-        dist_code.write(w)
-        for sym, (iv, ib), (cv, cb), lits, dsym in enc:
-            cmd_code.emit(w, sym)
-            w.write(iv, ib)
-            w.write(cv, cb)
-            for b in lits:
-                lit_code.emit(w, b)
-            if dsym is not None:
-                dist_code.emit(w, dsym[0])
-                w.write(dsym[1], dsym[2])
+        for m in modes[:nL]:
+            w.write(m, 2)
+        cmap_writers["lit"].write(w)
+        cmap_writers["dist"].write(w)
+        for g, (asize, ntrees) in groups.items():
+            for k in range(ntrees):
+                codes[(g, k)].write(w)
+        for ev in events:
+            if ev[0] == "raw":
+                w.write(ev[1], ev[2])
+            else:
+                codes[(ev[0], ev[1])].emit(w, ev[2])
         if last:
             self.closed = True
         return self
@@ -743,6 +848,155 @@ class StreamBuilder:
         if trailing:
             self._fail("trailing bytes after the last metablock")
         return data, (None if self.invalid else bytes(self.model.out))
+
+
+CATS = ("lit", "cmd", "dist")
+BLOCK_LEN_OFFSET = [1, 5, 9, 13, 17, 25, 33, 41, 49, 65, 81, 97, 113, 145, 177, 209, 241, 305,
+                    369, 497, 753, 1265, 2289, 4337, 8433, 16625]
+BLOCK_LEN_NBITS = [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 7, 8, 9, 10, 11, 12, 13,
+                   24]
+
+
+def _block_count_symbol(n):
+    for k in range(25, -1, -1):
+        if BLOCK_LEN_OFFSET[k] <= n:
+            if n - BLOCK_LEN_OFFSET[k] >= (1 << BLOCK_LEN_NBITS[k]):
+                raise ValueError("block count %d too large" % n)
+            return k, n - BLOCK_LEN_OFFSET[k], BLOCK_LEN_NBITS[k]
+    raise ValueError("block count must be >= 1")
+
+
+def write_varlen_uint8(w, v):
+    """RFC 7932 VarLenUint8 (0..255)."""
+    if v == 0:
+        w.write(0, 1)
+        return
+    n = v.bit_length() - 1
+    w.write(1, 1)
+    w.write(n, 3)
+    w.write(v - (1 << n), n)
+
+
+class _BlockState:
+    def __init__(self, blocks, n, rng):
+        self.blocks = blocks
+        self.n = n
+        self.idx = 0
+        self.type = 0
+        self.remaining = blocks[0][1]
+        self.rb = [1, 0]  # [second-to-last, last] block types, as in the decoder
+        self.rng = rng
+
+    def switch(self):
+        self.idx += 1
+        t, count = self.blocks[self.idx]
+        options = [t + 2]
+        if t == self.rb[0]:
+            options.append(0)
+        if t == (self.rb[1] + 1) % self.n:
+            options.append(1)
+        code = self.rng.choice(options) if self.rng else min(options)
+        self.rb = [self.rb[1], t]
+        self.type = t
+        self.remaining = count
+        return code, _block_count_symbol(count)
+
+
+def mtf_encode(values):
+    lst = list(range(256))
+    out = []
+    for v in values:
+        i = lst.index(v)
+        out.append(i)
+        lst.pop(i)
+        lst.insert(0, v)
+    return out
+
+
+class _ContextMapWriter:
+    """Context map encoding (RFC 7932 section 7.3): RLE of zeros + IMTF."""
+
+    def __init__(self, values, ntrees, rlemax, imtf):
+        self.ntrees, self.rlemax, self.imtf = ntrees, rlemax, imtf
+        if ntrees < 2:
+            return
+        vals = mtf_encode(values) if imtf else list(values)
+        toks = []
+        i = 0
+        while i < len(vals):
+            if vals[i] == 0 and rlemax > 0:
+                r = 1
+                while i + r < len(vals) and vals[i + r] == 0:
+                    r += 1
+                i += r
+                while r > 0:
+                    if r == 1:
+                        toks.append((0, 0, 0))
+                        r -= 1
+                        continue
+                    k = min(r.bit_length() - 1, rlemax)
+                    take = min(r, (2 << k) - 1)
+                    toks.append((k, take - (1 << k), k))
+                    r -= take
+            else:
+                toks.append((vals[i] + rlemax if vals[i] else 0, 0, 0))
+                i += 1
+        self.toks = toks
+        freq = {}
+        for t in toks:
+            freq[t[0]] = freq.get(t[0], 0) + 1
+        self.code = PrefixCode(ntrees + rlemax, freq)
+
+    def write(self, w):
+        write_varlen_uint8(w, self.ntrees - 1)
+        if self.ntrees < 2:
+            return
+        w.write(1 if self.rlemax else 0, 1)
+        if self.rlemax:
+            w.write(self.rlemax - 1, 4)
+        self.code.write(w)
+        for sym, extra, nbits in self.toks:
+            self.code.emit(w, sym)
+            w.write(extra, nbits)
+        w.write(1 if self.imtf else 0, 1)
+
+
+def random_blocks(r, max_types=4):
+    """Callable block spec producing a random split with up to max_types types."""
+    def make(nsym):
+        n = r.choice([1, 2, 2, 3, max_types])
+        if n == 1 or nsym <= 1:
+            return [(0, max(nsym, 1))]
+        out = [(0, r.randint(1, max(1, nsym // 2)))]
+        total = out[0][1]
+        while total < nsym:
+            cnt = r.choice([1, 1, 2, 3, r.randint(1, max(1, nsym))])
+            out.append((r.randrange(n), cnt))
+            total += cnt
+        # make sure the declared number of types is n (types may be unused)
+        if max(t for t, _ in out) < n - 1:
+            out.append((n - 1, 1))
+        return out
+    return make
+
+
+def random_cmap(r, max_trees=4):
+    def make(size):
+        ntrees = r.choice([1, 2, 3, max_trees])
+        if ntrees == 1:
+            return [0] * size, 1
+        style = r.random()
+        if style < 0.3:
+            vals = [r.randrange(ntrees) for _ in range(size)]
+        elif style < 0.6:
+            vals = [0] * size
+            for _ in range(r.randint(1, 4)):
+                vals[r.randrange(size)] = r.randrange(ntrees)
+        else:
+            vals = [(i // max(1, size // ntrees)) % ntrees for i in range(size)]
+        vals[r.randrange(size)] = ntrees - 1  # ensure the top tree index occurs
+        return vals, ntrees
+    return make
 
 
 def simple_stream(content, wbits=16):
@@ -829,12 +1083,22 @@ def random_stream(r, max_out=4000):
             cmds = [Cmd(b"z")]
         fc = tuple(x for x in ("lit", "cmd", "dist") if r.random() < 0.3)
         hskip = r.choice([0, 0, 2, 3])
+        extra = {}
+        if r.random() < 0.5:
+            extra = dict(blocks={c: random_blocks(r) for c in CATS if r.random() < 0.7},
+                         context_modes=[r.randrange(4) for _ in range(4)],
+                         lit_cmap=random_cmap(r) if r.random() < 0.7 else None,
+                         dist_cmap=random_cmap(r) if r.random() < 0.5 else None,
+                         cmap_rle={"lit": r.choice([0, 1, 3, 16]), "dist": r.choice([0, 2])},
+                         cmap_imtf={"lit": r.random() < 0.5, "dist": r.random() < 0.5},
+                         rng=r)
+            desc.append("B")
         try:
             b.compressed(cmds, last=last, npostfix=npostfix, ndirect=ndirect,
                          context_mode=r.randrange(4), force_complex=fc, hskip=hskip,
-                         use_repeats=r.random() < 0.6, tree_select=r.randrange(2))
+                         use_repeats=r.random() < 0.6, tree_select=r.randrange(2), **extra)
         except ValueError:
-            b.compressed(cmds, last=last, npostfix=npostfix, ndirect=ndirect)
+            b.compressed(cmds, last=last, npostfix=npostfix, ndirect=ndirect, **extra)
         desc.append("C%d%s" % (len(cmds), "L" if last else ""))
         if last:
             break

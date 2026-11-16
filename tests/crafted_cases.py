@@ -663,6 +663,105 @@ def _():
 
 
 # --------------------------------------------------------------------------
+# Block switching and context modelling
+# --------------------------------------------------------------------------
+
+@case("blocks_256_literal_types_256_trees")
+def _():
+    r = _r(12)
+    data = bytes(r.randrange(256) for _ in range(700))
+    # every literal switches block type; 256 types; 256 literal trees
+    types = [0] + [r.randrange(256) for _ in range(len(data) - 1)]
+    types[1:3] = [255, 254]
+    blocks = {"lit": [(t, 1) for t in types]}
+    cmap = ([(i * 7) % 256 for i in range(256 * 64)], 256)
+    return StreamBuilder(16).compressed([Cmd(data)], last=True, blocks=blocks,
+                                        context_modes=[i % 4 for i in range(256)],
+                                        lit_cmap=cmap, cmap_rle={"lit": 16},
+                                        cmap_imtf={"lit": True}).finish()
+
+
+@case("blocks_type_codes_prev_and_next")
+def _():
+    # rng=None makes the builder prefer type codes 0 (second-to-last type)
+    # and 1 (last type + 1, wrapping) whenever they apply.
+    data = bytes(range(97, 123)) * 4
+    seq = [0, 1, 0, 1, 2, 0, 2, 2, 1, 2, 0, 1, 2]
+    blocks = {"lit": [(t, 8) for t in seq]}
+    return StreamBuilder(16).compressed([Cmd(data)], last=True, blocks=blocks).finish()
+
+
+@case("blocks_large_counts")
+def _():
+    r = _r(13)
+    data = bytes(r.choice(b"abcd") for _ in range(40000))
+    blocks = {"lit": [(0, 16625 + 1000), (1, 3), (0, 1 << 24)],
+              "cmd": [(0, 1), (1, 1 << 20)], "dist": [(0, 2), (1, 9000)]}
+    cmds = [Cmd(data[:20000], copy=100, dist=17), Cmd(data[20000:], copy=50, dist=3),
+            Cmd(b"x", copy=4, dist=1), Cmd(b"yz")]
+    return StreamBuilder(18).compressed(cmds, last=True, blocks=blocks).finish()
+
+
+for _m in range(4):
+    def _mk_mode(mode):
+        def build():
+            r = _r(200 + mode)
+            text = ("Grüße, мир! 日本語 hello WORLD 123 -45 +6 \x00\x7f\xff " * 20).encode("utf-8", "surrogatepass")
+            data = text + bytes(r.randrange(256) for _ in range(500))
+            cmap = ([c % 5 for c in range(64)], 5)  # tree depends on context id
+            return StreamBuilder(16).compressed([Cmd(data)], last=True, context_modes=[mode],
+                                                lit_cmap=cmap, cmap_rle={"lit": 2}).finish()
+        return build
+    add("context_mode_%d_context_dependent_trees" % _m, _mk_mode(_m))
+
+
+@case("distance_context_map_by_copy_length")
+def _():
+    r = _r(14)
+    cmds = [Cmd(r.randbytes(3), copy=L, dist=r.randint(1, 3)) for L in (2, 3, 4, 5, 9, 2, 3, 4, 40) * 20]
+    dist_cmap = ([0, 1, 2, 3, 3, 2, 1, 0], 4)
+    blocks = {"dist": [(0, 30), (1, 30), (0, 1000)]}
+    return StreamBuilder(16).compressed(cmds, last=True, blocks=blocks, dist_cmap=dist_cmap,
+                                        cmap_imtf={"dist": True}).finish()
+
+
+@case("command_block_types_own_trees")
+def _():
+    r = _r(15)
+    cmds = []
+    for i in range(200):
+        cmds.append(Cmd(bytes([97 + i % 26]) * (i % 7), copy=2 + i % 30, dist=1 + i % 3 if i else None,
+                        code=None if i else 0))
+    cmds[0] = Cmd(b"start", copy=3, dist=2)
+    blocks = {"cmd": [(i % 3, 1 + (i % 5)) for i in range(120)]}
+    return StreamBuilder(16).compressed(cmds, last=True, blocks=blocks, rng=r).finish()
+
+
+for _seed in range(30):
+    def _mk_blk(seed):
+        def build():
+            from tests.bitstream import random_blocks, random_cmap, CATS
+            r = random.Random(30_000 + seed)
+            data = bytes(r.choice(b"abcdefgh\x00\xff") for _ in range(r.randint(50, 2000)))
+            cmds = []
+            pos = 0
+            while pos < len(data) - 1:
+                n = r.randint(1, 40)
+                ins = data[pos:pos + n]
+                pos += len(ins)
+                cmds.append(Cmd(ins, copy=r.randint(2, 30), dist=r.randint(1, pos)))
+            cmds.append(Cmd(b"!"))
+            return StreamBuilder(16).compressed(
+                cmds, last=True, blocks={c: random_blocks(r, 8) for c in CATS},
+                context_modes=[r.randrange(4) for _ in range(8)],
+                lit_cmap=random_cmap(r, 8), dist_cmap=random_cmap(r, 6),
+                cmap_rle={"lit": r.choice([0, 1, 4, 16]), "dist": r.choice([0, 1, 3])},
+                cmap_imtf={"lit": r.random() < 0.5, "dist": r.random() < 0.5}, rng=r).finish()
+        return build
+    add("blocks_random_%02d" % _seed, _mk_blk(_seed))
+
+
+# --------------------------------------------------------------------------
 # Multi-metablock / mixed
 # --------------------------------------------------------------------------
 

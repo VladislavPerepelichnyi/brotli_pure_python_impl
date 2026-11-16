@@ -269,12 +269,9 @@ def test_out_of_byte_range_parameters(kwargs):
         brotli.compress(b'data', **dict(dict(quality=5), **kwargs))
 
 
-@pytest.mark.parametrize("quality", [0, 1])
-def test_unsupported_quality(quality):
-    with pytest.raises(UnsupportedQualityError) as info:
-        brotli_pure.compress(b'data', quality=quality)
-    assert isinstance(info.value, brotli_pure.error)
-    assert isinstance(info.value, NotImplementedError)
+def test_unsupported_quality_error_type():
+    assert issubclass(UnsupportedQualityError, brotli_pure.error)
+    assert issubclass(UnsupportedQualityError, NotImplementedError)
 
 
 @pytest.mark.oracle
@@ -307,3 +304,32 @@ def test_qualities_7_to_9_byte_exact(name, data, lgwin, quality):
 def test_qualities_2_to_4_byte_exact(name, data, lgwin, quality):
     # H2 / H3 / H4 quickly hashers, StoreMetaBlockFast / Trivial.
     _check(data, quality, lgwin, 0)
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize('quality', [0, 1])
+@pytest.mark.parametrize('lgwin', [10, 16, 18, 22])
+@pytest.mark.parametrize('name,data', [SMALL[0], SMALL[3], SMALL[9], SMALL[12],
+                                       SMALL[13], SMALL[15], LARGE[0],
+                                       LARGE[1], LARGE[7]],
+                         ids=[n for n, _ in (SMALL[0], SMALL[3], SMALL[9],
+                                             SMALL[12], SMALL[13], SMALL[15],
+                                             LARGE[0], LARGE[1], LARGE[7])])
+def test_qualities_0_and_1_byte_exact(name, data, lgwin, quality):
+    # BrotliCompressFragmentFast / BrotliCompressFragmentTwoPass via
+    # BrotliEncoderCompressStreamFast.
+    _check(data, quality, lgwin, 0)
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize('quality', [0, 1, 3, 9])
+def test_streaming_flush_other_qualities(quality):
+    from brotli_pure.enc.encode import Compressor
+    rng = random.Random(21)
+    data = _text(rng, 90000) + _rand_bytes(rng, 20000) + _text(rng, 50000)
+    chunks = [data[:4000], data[4000:80000], data[80000:]]
+    mine = Compressor(quality=quality, lgwin=18)
+    ref = brotli.Compressor(quality=quality, lgwin=18)
+    a = b''.join(mine.process(c) + mine.flush() for c in chunks) + mine.finish()
+    b = b''.join(ref.process(c) + ref.flush() for c in chunks) + ref.finish()
+    assert a == b

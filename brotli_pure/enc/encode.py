@@ -7,12 +7,15 @@ blocks, stream offsets and attached dictionaries are not supported).
 Compressor.finish()``, i.e. one PROCESS call with the whole input followed by
 one FINISH call.
 
-Supported qualities: 5 and 6 (the generic "hasher + greedy metablock" path
-with the H40, H58 and H68 hashers that the x86-64 reference build uses for
-them), and 10 / 11 through the zopfli modules (backward_references_hq.py,
-metablock_hq.py, hash_to_binary_tree.py, ...), which are imported lazily.
-Other qualities raise ``UnsupportedQualityError`` (a subclass of both
-``brotli_pure.error`` and ``NotImplementedError``).
+Supported qualities: all of 0-11.  Qualities 0 and 1 use the fragment
+compressors (compress_fragment.py, compress_fragment_two_pass.py), 2-9 the
+generic "hasher + backward references" path with the hashers that the x86-64
+reference build selects for them (H2/H3/H4/H54, H40/H41/H42, H5/H6, H58/H68),
+and 10 / 11 the zopfli modules (backward_references_hq.py, metablock_hq.py,
+hash_to_binary_tree.py, ...; developed on the enc-q11 branch), which are
+imported lazily.  ``UnsupportedQualityError`` (a subclass of both
+``brotli_pure.error`` and ``NotImplementedError``) is kept for code paths
+that are not ported (none of the qualities reachable through ``compress``).
 """
 
 from ..common.constants import (MODE_GENERIC, MODE_TEXT, MODE_FONT,
@@ -48,6 +51,7 @@ from .quality import (sanitize_params, compute_lg_block, max_metablock_size,
                       MIN_QUALITY_FOR_HQ_CONTEXT_MODELING,
                       MIN_QUALITY_FOR_HQ_BLOCK_SPLITTING,
                       MAX_NUM_DELAYED_SYMBOLS)
+from .quality import max_hash_table_size
 from .ringbuffer import RingBuffer
 from .write_bits import BitWriter
 
@@ -74,7 +78,7 @@ BROTLI_FLINT_DONE = -2
 BROTLI_UINT32_MAX = 0xFFFFFFFF
 
 #: Qualities whose code path is fully ported.
-SUPPORTED_QUALITIES = (2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+SUPPORTED_QUALITIES = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 
 kMinUTF8Ratio = 0.75
 
@@ -110,6 +114,28 @@ def encode_window_bits(lgwin, large_window):
         return ((lgwin - 17) << 1) | 0x01, 4
     else:
         return ((lgwin - 8) << 4) | 0x01, 7
+
+
+def hash_table_size(max_table_size, input_size):
+    """HashTableSize."""
+    htsize = 256
+    while htsize < max_table_size and htsize < input_size:
+        htsize <<= 1
+    return htsize
+
+
+def get_hash_table(quality, input_size):
+    """GetHashTable: returns a zeroed hash table (list) for qualities 0/1.
+    Use smaller hash table when input.size() is smaller, since we fill the
+    table, incurring O(hash table size) overhead for compression, and if the
+    input is short, we won't need that many hash table entries anyway."""
+    max_table_size = max_hash_table_size(quality)
+    htsize = hash_table_size(max_table_size, input_size)
+    if quality == FAST_ONE_PASS_COMPRESSION_QUALITY:
+        # Only odd shifts are supported by fast-one-pass.
+        if (htsize & 0xAAAAA) == 0:
+            htsize <<= 1
+    return [0] * htsize
 
 
 def estimate_entropy(population, start, size):
@@ -448,6 +474,8 @@ class BrotliEncoderState(object):
         self.remaining_metadata_bytes = BROTLI_UINT32_MAX
         # Pending output (C: next_out_ / available_out_).
         self.pending = b''
+        self.one_pass_arena = None
+        self.two_pass_arena = None
         # Initialize distance cache.
         self.dist_cache = [4, 11, 15, 16] + [0] * 12
         # Save the state of the distance cache in case we need to restore it
@@ -514,6 +542,15 @@ class BrotliEncoderState(object):
             lgwin = max(lgwin, 18)
         self.last_bytes, self.last_bytes_bits = encode_window_bits(
             lgwin, p.large_window)
+
+        if p.quality == FAST_ONE_PASS_COMPRESSION_QUALITY:
+            from .compress_fragment import (BrotliOnePassArena,
+                                            init_command_prefix_codes)
+            self.one_pass_arena = BrotliOnePassArena()
+            init_command_prefix_codes(self.one_pass_arena)
+        elif p.quality == FAST_TWO_PASS_COMPRESSION_QUALITY:
+            from .compress_fragment_two_pass import BrotliTwoPassArena
+            self.two_pass_arena = BrotliTwoPassArena()
 
         self.is_initialized = True
         return True
@@ -641,8 +678,23 @@ class BrotliEncoderState(object):
         if delta > self.input_block_size():
             raise BrotliError('brotli: encoder failed')
         if fast_compress:
-            raise UnsupportedQualityError(
-                'quality %d is not supported' % p.quality)
+            w = BitWriter(self.last_bytes, self.last_bytes_bits)
+            table = get_hash_table(p.quality, bytes_)
+            start = wrapped_last_processed_pos & mask
+            if p.quality == FAST_ONE_PASS_COMPRESSION_QUALITY:
+                from .compress_fragment import brotli_compress_fragment_fast
+                brotli_compress_fragment_fast(
+                    self.one_pass_arena, data, start, bytes_, is_last, table,
+                    len(table), w)
+            else:
+                from .compress_fragment_two_pass import \
+                    brotli_compress_fragment_two_pass
+                brotli_compress_fragment_two_pass(
+                    self.two_pass_arena, data, start, bytes_, is_last, table,
+                    len(table), w)
+            out, self.last_bytes, self.last_bytes_bits = w.get_output()
+            self.update_last_processed_pos()
+            return out
 
         init_or_stitch_to_previous_block(self.hasher, data, mask, p,
                                          wrapped_last_processed_pos, bytes_,
@@ -771,6 +823,68 @@ class BrotliEncoderState(object):
             out.append((seal >> 16) & 0xFF)
         self.pending += bytes(out)
 
+    def compress_stream_fast(self, op, data):
+        """BrotliEncoderCompressStreamFast (qualities 0 and 1): compresses
+        the caller's input directly, in blocks of at most 1 << lgwin bytes."""
+        p = self.params
+        block_size_limit = 1 << p.lgwin
+        next_in = 0
+        available_in = len(data)
+        output = []
+        if p.quality == FAST_ONE_PASS_COMPRESSION_QUALITY:
+            from .compress_fragment import brotli_compress_fragment_fast \
+                as fragment
+            arena = self.one_pass_arena
+        else:
+            from .compress_fragment_two_pass import \
+                brotli_compress_fragment_two_pass as fragment
+            arena = self.two_pass_arena
+        while True:
+            # InjectFlushOrPushOutput
+            if (self.stream_state == BROTLI_STREAM_FLUSH_REQUESTED and
+                    self.last_bytes_bits != 0):
+                self._inject_byte_padding_block()
+                continue
+            if self.pending:
+                output.append(self.pending)
+                self.total_out += len(self.pending)
+                self.pending = b''
+                continue
+            # Compress block only when internal output buffer is empty, stream
+            # is not finished, there is no pending flush request, and there is
+            # either additional input or pending operation.
+            if (self.stream_state == BROTLI_STREAM_PROCESSING and
+                    (available_in != 0 or op != BROTLI_OPERATION_PROCESS)):
+                block_size = min(block_size_limit, available_in)
+                is_last = (available_in == block_size and
+                           op == BROTLI_OPERATION_FINISH)
+                force_flush = (available_in == block_size and
+                               op == BROTLI_OPERATION_FLUSH)
+                if force_flush and block_size == 0:
+                    self.stream_state = BROTLI_STREAM_FLUSH_REQUESTED
+                    continue
+                w = BitWriter(self.last_bytes, self.last_bytes_bits)
+                table = get_hash_table(p.quality, block_size)
+                fragment(arena, data, next_in, block_size, is_last, table,
+                         len(table), w)
+                if block_size != 0:
+                    next_in += block_size
+                    available_in -= block_size
+                    self.total_in += block_size
+                out, self.last_bytes, self.last_bytes_bits = w.get_output()
+                self.pending = out
+                if force_flush:
+                    self.stream_state = BROTLI_STREAM_FLUSH_REQUESTED
+                if is_last:
+                    self.stream_state = BROTLI_STREAM_FINISHED
+                continue
+            break
+        # CheckFlushComplete
+        if (self.stream_state == BROTLI_STREAM_FLUSH_REQUESTED and
+                not self.pending):
+            self.stream_state = BROTLI_STREAM_PROCESSING
+        return b''.join(output)
+
     def compress_stream(self, op, data=b''):
         """BrotliEncoderCompressStream for one call with all of ``data``
         available and an unbounded output buffer; returns the produced
@@ -785,6 +899,9 @@ class BrotliEncoderState(object):
         available_in = len(data)
         if self.stream_state != BROTLI_STREAM_PROCESSING and available_in != 0:
             raise BrotliError('brotli: encoder failed')
+        if (self.params.quality == FAST_ONE_PASS_COMPRESSION_QUALITY or
+                self.params.quality == FAST_TWO_PASS_COMPRESSION_QUALITY):
+            return self.compress_stream_fast(op, data)
         output = []
         while True:
             remaining_block_size = self.remaining_input_block_size()

@@ -394,3 +394,31 @@ def test_q10_multi_block():
 @pytest.mark.oracle
 def test_q11_bb_binast_prefix():
     _check(_testdata("bb.binast")[:400000], 11, 22, 0)
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("lgblock", [16, 17])
+def test_q11_lgblock_small_blocks(lgblock):
+    # 64 KiB / 128 KiB input blocks: several blocks are merged into one
+    # metablock and the hasher is stitched between blocks.
+    data = _text(70000, 31) + _binary(10000, 32)
+    brotli = _oracle()
+    got = brotli_pure.compress(data, quality=11, lgwin=20, lgblock=lgblock)
+    want = brotli.compress(data, quality=11, lgwin=20, lgblock=lgblock)
+    assert got == want
+
+
+@slow
+@pytest.mark.slow
+@pytest.mark.oracle
+@pytest.mark.parametrize("quality,lgwin,lgblock,mode", [
+    (11, 22, 16, 0), (11, 16, 24, 1), (10, 20, 16, 2), (11, 10, 16, 0)])
+def test_lgblock_multi_block(quality, lgwin, lgblock, mode):
+    data = _text(90000, 41) + bytes(random.Random(42).getrandbits(8)
+                                    for _ in range(30000)) + _text(50000, 43)
+    brotli = _oracle()
+    got = brotli_pure.compress(data, quality=quality, lgwin=lgwin,
+                               lgblock=lgblock, mode=mode)
+    want = brotli.compress(data, quality=quality, lgwin=lgwin,
+                           lgblock=lgblock, mode=mode)
+    assert got == want

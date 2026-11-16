@@ -70,5 +70,7 @@ tests skip cleanly when `brotli` cannot be imported.
 - `compress_common.py`: shared checks for the q5/q11 modules. Each
   compression is run once and cached.
 
-Implementation bugs and oracle quirks that these tests found are recorded in
-`tests/FINDINGS.md`.
+Implementation bugs, discrepancies and reference-library quirks found by this
+suite are reported to the orchestrator with minimal reproducers. The
+reproducers are named cases in `crafted_cases.py` or one-line oracle
+comparisons.

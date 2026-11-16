@@ -7,6 +7,7 @@
 #   h10_harness FILE LGWIN Q              FindAllMatchesH10 (+StoreRangeH10) like the HQ loop
 #   zop_harness FILE LGWIN Q [FONT]       BrotliCreate{Hq,}ZopfliBackwardReferences commands
 #   mb_harness  FILE LGWIN Q FONT CMODE   + BrotliBuildMetaBlock (splits, context maps, histograms)
+#   lc_harness  FILE [POS MASK]           BrotliEstimateBitCostsForLiterals (float bit patterns)
 #
 # Usage: tools/enc_q11_harness/gen_golden.sh [path/to/brotli_reference]
 set -e
@@ -19,7 +20,7 @@ for f in "$R"/common/*.c "$R"/enc/*.c; do
   gcc -O2 -c -I"$R/include" "$f" -o "$OUT/obj/$(basename "$f" .c).o"
 done
 ar rcs "$OUT/libbref.a" "$OUT"/obj/*.o
-for h in sd h10 zop mb; do
+for h in sd h10 zop mb lc; do
   gcc -O2 -I"$R" -I"$R/include" "$HERE/${h}_harness.c" "$OUT/libbref.a" -lm -o "$OUT/${h}_harness"
 done
 python3 "$HERE/gen_golden.py" "$OUT" "$REF/tests/testdata/alice29.txt" "$HERE/../../tests/data/enc_q11_golden.bin"

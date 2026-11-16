@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brotli_pure"
+version = "0.1.0"
+description = "Pure-Python port of Google's Brotli compressor/decompressor (reference: google/brotli v1.2.1)"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+include = ["brotli_pure*"]
+
+[tool.setuptools.package-data]
+"brotli_pure.common" = ["*.bin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "slow: long-running tests (large inputs / quality 11)",
+  "oracle: tests that need the C reference brotli module",
+]

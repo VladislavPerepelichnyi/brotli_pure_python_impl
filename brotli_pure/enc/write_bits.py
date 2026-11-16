@@ -53,6 +53,42 @@ class BitWriter(object):
         assert self.nbits == 0
         self.buf += data
 
+    def update_bits(self, n_bits, bits, pos):
+        """UpdateBits (compress_fragment.c): overwrites n_bits bits at bit
+        position pos (which may already have been written)."""
+        self.flush_bytes()
+        buf = self.buf
+        nbuf = len(buf)
+        while n_bits > 0:
+            byte_pos = pos >> 3
+            n_unchanged_bits = pos & 7
+            n_changed_bits = min(n_bits, 8 - n_unchanged_bits)
+            total_bits = n_unchanged_bits + n_changed_bits
+            mask = (~((1 << total_bits) - 1)) | ((1 << n_unchanged_bits) - 1)
+            changed_bits = bits & ((1 << n_changed_bits) - 1)
+            if byte_pos < nbuf:
+                buf[byte_pos] = ((changed_bits << n_unchanged_bits) |
+                                 (buf[byte_pos] & mask)) & 0xFF
+            else:
+                assert byte_pos == nbuf
+                self.acc = (((changed_bits << n_unchanged_bits) |
+                             (self.acc & mask)) & 0xFF)
+            n_bits -= n_changed_bits
+            bits >>= n_changed_bits
+            pos += n_changed_bits
+
+    def rewind(self, new_storage_ix):
+        """RewindBitPosition (compress_fragment*.c)."""
+        self.flush_bytes()
+        bp = new_storage_ix >> 3
+        if bp < len(self.buf):
+            byte = self.buf[bp]
+            del self.buf[bp:]
+        else:
+            byte = self.acc & 0xFF
+        self.acc = byte & ((1 << (new_storage_ix & 7)) - 1)
+        self.nbits = new_storage_ix & 7
+
     def get_output(self):
         """Returns (complete_bytes, last_byte, last_bits): C
         ``storage[0 : storage_ix >> 3]``, ``storage[storage_ix >> 3]`` and

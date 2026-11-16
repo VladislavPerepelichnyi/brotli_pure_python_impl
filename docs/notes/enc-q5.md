@@ -5,6 +5,27 @@ File/line references are relative to `brotli_reference/c/`.
 
 ## Suspected bugs / questionable behaviour
 
+0. **Copy-paste bug in the quality-1 hash table update**
+   (`enc/compress_fragment_two_pass.c:359`).  After emitting a match that
+   was preceded by literals, `CreateCommands` inserts the hashes of the
+   positions `ip-3`, `ip-2`, `ip-1` (min_match == 4 case).  The third one is
+   computed as `HashBytesAtOffset(input_bytes, 0, ...)` -- offset **0**, i.e.
+   the hash of `ip-3` again -- and stored with position `ip-1`.  The
+   identical block a few lines later (line 418, after a literal-free match)
+   and the one-pass compressor (`enc/compress_fragment.c:612,653`) correctly
+   use offset 2.  Effect: the table slot for the bytes at `ip-3` ends up
+   pointing at `ip-1` (bytes that generally do not hash there) and `ip-1` is
+   never inserted.  Output stays valid because every candidate is verified
+   with `IsMatch`, but quality 1 loses some matches whenever the hash table
+   has <= 2^15 entries (i.e. fragments shorter than 32 KiB, or lgwin <= 15).
+   It surfaced because a port that used the same offset in both blocks
+   diverged from the oracle.  Measured with the port (offset 2 in both
+   places vs. the C behaviour, quality 1, testdata files monkey, alice29.txt,
+   random_chunks, mapsdatazrh, asyoulik.txt, lcet10.txt): fixing the typo
+   shrinks the total output by 0.22 % at lgwin 10 (655243 -> 653808 bytes)
+   and by 1.16 % at lgwin 15 (514263 -> 508297 bytes).  The port reproduces
+   the C behaviour (`compress_fragment_two_pass.py`, `_update_table(..., third_offset)`).
+
 1. **`BROTLI_NUM_DISTANCE_SYMBOLS` has its macro arguments swapped**
    (`common/constants.h:70-73`).
    `BROTLI_DISTANCE_ALPHABET_SIZE(NPOSTFIX, NDIRECT, MAXNBITS)` is invoked as

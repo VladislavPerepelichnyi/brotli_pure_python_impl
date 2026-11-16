@@ -18,10 +18,13 @@ File/line references are relative to `brotli_reference/c/`.
    never inserted.  Output stays valid because every candidate is verified
    with `IsMatch`, but quality 1 loses some matches whenever the hash table
    has <= 2^15 entries (i.e. fragments shorter than 32 KiB, or lgwin <= 15).
-   This was found because the straightforward port (offset 2 in both places)
-   produced different (smaller!) output than the oracle on e.g.
-   `testdata/monkey`; the port now reproduces the C behaviour
-   (`compress_fragment_two_pass.py`, `_update_table(..., third_offset)`).
+   It surfaced because a port that used the same offset in both blocks
+   diverged from the oracle.  Measured with the port (offset 2 in both
+   places vs. the C behaviour, quality 1, testdata files monkey, alice29.txt,
+   random_chunks, mapsdatazrh, asyoulik.txt, lcet10.txt): fixing the typo
+   shrinks the total output by 0.22 % at lgwin 10 (655243 -> 653808 bytes)
+   and by 1.16 % at lgwin 15 (514263 -> 508297 bytes).  The port reproduces
+   the C behaviour (`compress_fragment_two_pass.py`, `_update_table(..., third_offset)`).
 
 1. **`BROTLI_NUM_DISTANCE_SYMBOLS` has its macro arguments swapped**
    (`common/constants.h:70-73`).

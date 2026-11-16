@@ -269,7 +269,7 @@ def test_out_of_byte_range_parameters(kwargs):
         brotli.compress(b'data', **dict(dict(quality=5), **kwargs))
 
 
-@pytest.mark.parametrize('quality', [0, 1, 2, 3, 4, 7, 8, 9])
+@pytest.mark.parametrize("quality", [0, 1, 2, 3, 4])
 def test_unsupported_quality(quality):
     with pytest.raises(UnsupportedQualityError) as info:
         brotli_pure.compress(b'data', quality=quality)
@@ -284,3 +284,13 @@ def test_explicit_lgblock(lgblock):
     expected = brotli.compress(data, quality=5, lgwin=22, lgblock=lgblock)
     assert brotli_pure.compress(data, quality=5, lgwin=22,
                                 lgblock=lgblock) == expected
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize('quality', [7, 8, 9])
+@pytest.mark.parametrize('lgwin', [12, 16, 18, 22])
+@pytest.mark.parametrize('name,data', [SMALL[9], SMALL[12], SMALL[13], SMALL[15]],
+                         ids=[SMALL[i][0] for i in (9, 12, 13, 15)])
+def test_qualities_7_to_9_byte_exact(name, data, lgwin, quality):
+    # H5 / H41 / H42 (and H6 for >= 1 MiB inputs) hashers, 3-context maps.
+    _check(data, quality, lgwin, 1)

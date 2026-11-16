@@ -72,7 +72,7 @@ BROTLI_FLINT_DONE = -2
 BROTLI_UINT32_MAX = 0xFFFFFFFF
 
 #: Qualities whose code path is fully ported.
-SUPPORTED_QUALITIES = (5, 6, 10, 11)
+SUPPORTED_QUALITIES = (5, 6, 7, 8, 9, 10, 11)
 
 kMinUTF8Ratio = 0.75
 

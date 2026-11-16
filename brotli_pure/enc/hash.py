@@ -202,6 +202,12 @@ def _hasher_class(type_):
     if type_ == 10:
         from .hash_to_binary_tree import H10
         return H10
+    if type_ == 5:
+        from .hash_longest_match import H5
+        return H5
+    if type_ == 6:
+        from .hash_longest_match64 import H6
+        return H6
     if type_ == 58:
         from .hash_longest_match_simd import H58
         return H58

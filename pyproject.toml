@@ -14,6 +14,7 @@ include = ["brotli_pure*"]
 
 [tool.setuptools.package-data]
 "brotli_pure.common" = ["*.bin"]
+"brotli_pure.enc" = ["*.bin"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
